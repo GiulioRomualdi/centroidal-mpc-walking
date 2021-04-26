@@ -7,10 +7,6 @@ cmake_minimum_required(VERSION 3.14)
 project(CentroidalMPCWalking
   VERSION 0.0.1)
 
-find_package(Eigen3 3.2.92 REQUIRED)
-find_package(BipedalLocomotionFramework 0.1.0 REQUIRED)
-
-
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 
 option(BUILD_SHARED_LIBS "Build libraries as shared as opposed to static" ON)
