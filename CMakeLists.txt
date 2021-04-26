@@ -64,32 +64,27 @@ add_install_rpath_support(BIN_DIRS "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BIND
   USE_LINK_PATH)
 
 
+find_package(Eigen3 3.2.92 REQUIRED)
+find_package(BipedalLocomotionFramework 0.1.0 REQUIRED)
+
 #Function to automatize the process of creating a new library
-include(AddCentroidalMPCWalkingLibrary)
-
-if(BUILD_TESTING)
-  find_package(Catch2 REQUIRED)
-endif()
-
-include(AddCentroidalMPCWalkingUnitTest)
-
-
+include(AddCentroidalMPCWalkingApplication)
 
 add_subdirectory(src)
 
-include(InstallBasicPackageFiles)
-set(PROJECT_PRIVATE_DEPENDENCIES )
-set(PROJECT_PUBLIC_DEPENDENCIES BipedalLocomotionFramework)
-install_basic_package_files(${PROJECT_NAME}
-                            NAMESPACE CentroidalMPCWalking::
-                            VERSION ${CentroidalMPCWalking_VERSION}
-                            COMPATIBILITY AnyNewerVersion
-                            TARGETS_PROPERTY CentroidalMPCWalking_TARGETS
-                            VARS_PREFIX ${PROJECT_NAME}
-                            NO_CHECK_REQUIRED_COMPONENTS_MACRO
-                            DEPENDENCIES ${PROJECT_PUBLIC_DEPENDENCIES}
-                            PRIVATE_DEPENDENCIES ${PROJECT_PRIVATE_DEPENDENCIES}
-                            OVERRIDE_MODULE_PATH ${CMAKE_INSTALL_PREFIX}/share/${PROJECT_NAME}/cmake)
+# include(InstallBasicPackageFiles)
+# set(PROJECT_PRIVATE_DEPENDENCIES )
+# set(PROJECT_PUBLIC_DEPENDENCIES BipedalLocomotionFramework)
+# install_basic_package_files(${PROJECT_NAME}
+#                             NAMESPACE CentroidalMPCWalking::
+#                             VERSION ${CentroidalMPCWalking_VERSION}
+#                             COMPATIBILITY AnyNewerVersion
+#                             TARGETS_PROPERTY CentroidalMPCWalking_TARGETS
+#                             VARS_PREFIX ${PROJECT_NAME}
+#                             NO_CHECK_REQUIRED_COMPONENTS_MACRO
+#                             DEPENDENCIES ${PROJECT_PUBLIC_DEPENDENCIES}
+#                             PRIVATE_DEPENDENCIES ${PROJECT_PRIVATE_DEPENDENCIES}
+#                             OVERRIDE_MODULE_PATH ${CMAKE_INSTALL_PREFIX}/share/${PROJECT_NAME}/cmake)
 
 
 include(AddUninstallTarget)
