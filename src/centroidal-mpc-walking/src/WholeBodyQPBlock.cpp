@@ -10,7 +10,9 @@
 #include <iDynTree/Core/SpatialMomentum.h>
 #include <iDynTree/Model/Model.h>
 
+#include <BipedalLocomotion/ContactDetectors/FixedFootDetector.h>
 #include <BipedalLocomotion/Conversions/ManifConversions.h>
+#include <BipedalLocomotion/FloatingBaseEstimators/LeggedOdometry.h>
 #include <BipedalLocomotion/FloatingBaseEstimators/ModelComputationsHelper.h>
 #include <BipedalLocomotion/Math/Constants.h>
 #include <BipedalLocomotion/ParametersHandler/IParametersHandler.h>
@@ -19,6 +21,7 @@
 #include <BipedalLocomotion/System/Clock.h>
 #include <BipedalLocomotion/TextLogging/Logger.h>
 #include <CentroidalMPCWalking/WholeBodyQPBlock.h>
+
 #include <yarp/sig/Vector.h>
 
 #include <BipedalLocomotion/System/VariablesHandler.h>
@@ -28,9 +31,6 @@
 #include <thread>
 
 std::ofstream myfile;
-
-Eigen::Vector3d comPos0;
-std::size_t indexSin{0};
 
 using namespace CentroidalMPCWalking;
 using namespace BipedalLocomotion::ParametersHandler;
@@ -56,6 +56,36 @@ bool WholeBodyQPBlock::createKinDyn(const std::string& modelPath,
     {
         BipedalLocomotion::log()->error("{} Unable to load a KinDynComputation object",
                                         errorPrefix);
+        return false;
+    }
+
+    return true;
+}
+
+bool WholeBodyQPBlock::instantiateLeggedOdometry(std::shared_ptr<const IParametersHandler> handler,
+                                                 const std::string& modelPath,
+                                                 const std::vector<std::string>& jointLists)
+{
+    constexpr auto logPrefix = "[WholeBodyQPBlock::instantiateLeggedOdometry]";
+
+    auto handlerKinDyn = std::make_shared<StdImplementation>();
+    handlerKinDyn->setParameter("joints_list", jointLists);
+    handlerKinDyn->setParameter("model_file_name", modelPath);
+
+    auto kinDyn = BipedalLocomotion::Estimators::constructKinDynComputationsDescriptor(handlerKinDyn);
+
+
+    if (!m_floatingBaseEstimator.initialize(handler->getGroup("FLOATING_BASE_ESTIMATOR"),
+                                            kinDyn.kindyn))
+    {
+        BipedalLocomotion::log()->error("{} Unable to initialize the legged odometry.", logPrefix);
+        return false;
+    }
+
+    if (!m_fixedFootDetector.initialize(handler->getGroup("FIXED_FOOT_DETECTOR")))
+    {
+        BipedalLocomotion::log()->error("{} Unable to initialize the fixed foot detector.",
+                                        logPrefix);
         return false;
     }
 
@@ -167,7 +197,7 @@ bool WholeBodyQPBlock::instantiateIK(std::shared_ptr<const IParametersHandler> h
 
     m_IKandTasks.regularizationTask = std::make_shared<JointTrackingTask>();
 
-    if (!m_IKandTasks.regularizationTask->setKinDyn(m_kinDynWithMeasured.kindyn))
+    if (!m_IKandTasks.regularizationTask->setKinDyn(m_kinDynWithDesired.kindyn))
     {
         BipedalLocomotion::log()->error("{} Unable to set the kinDynObject for the com task.",
                                         logError);
@@ -230,6 +260,55 @@ bool WholeBodyQPBlock::instantiateSensorBridge(std::shared_ptr<const IParameters
     if (!m_sensorBridge.setDriversList(list))
     {
         BipedalLocomotion::log()->error("{} Unable to set the driver list.", errorPrefix);
+        return false;
+    }
+
+    return true;
+}
+
+bool WholeBodyQPBlock::updateFloatingBase()
+{
+    constexpr auto logPrefix = "[WholeBodyQPBlock::updateFloatingBase]";
+
+    if (!m_floatingBaseEstimator.setKinematics(m_currentJointPos, m_currentJointVel))
+    {
+        BipedalLocomotion::log()->error("{} Unable to set the kinematics in the base estimator.",
+                                        logPrefix);
+        return false;
+    }
+
+    for (const auto& [key, foot] : m_fixedFootDetector.getOutput())
+    {
+        // TODO Please change the signature of setContactStatus
+        const auto frameName = m_kinDynWithDesired.kindyn->model().getFrameName(foot.index);
+
+        if (!m_floatingBaseEstimator.setContactStatus(frameName,
+                                                      foot.isActive,
+                                                      foot.switchTime,
+                                                      foot.lastUpdateTime))
+        {
+            BipedalLocomotion::log()->error("{} Unable to set the contact status in the base "
+                                            "estimator.",
+                                            logPrefix);
+            return false;
+        }
+    }
+
+    if (!m_floatingBaseEstimator.advance())
+    {
+        BipedalLocomotion::log()->error("{} Unable to update the floating base estimator.",
+                                        logPrefix);
+        return false;
+    }
+
+    if (!m_floatingBaseEstimator
+             .changeFixedFrame(m_fixedFootDetector.getFixedFoot().index,
+                               m_fixedFootDetector.getFixedFoot().pose.quat(),
+                               m_fixedFootDetector.getFixedFoot().pose.translation()))
+    {
+        BipedalLocomotion::log()->error("{} Unable to change the fixed frame in the base "
+                                        "estimator.",
+                                        logPrefix);
         return false;
     }
 
@@ -300,11 +379,6 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
         return false;
     }
 
-    const std::string portRobotBase = "/" + name + "/robotBase:i";
-    m_robotBasePort.open(portRobotBase);
-
-    yarp::os::Network::connect("/icubSim/floating_base/state:o", portRobotBase);
-
     if (!this->createKinDyn(yarp::os::ResourceFinder::getResourceFinderSingleton().findFileByName(
                                 "model.urdf"),
                             m_robotControl.getJointList()))
@@ -322,6 +396,15 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
         return false;
     }
 
+    if (!this->instantiateLeggedOdometry(parametersHandler,
+                                         yarp::os::ResourceFinder::getResourceFinderSingleton()
+                                             .findFileByName("model.urdf"),
+                                         m_robotControl.getJointList()))
+    {
+        BipedalLocomotion::log()->error("{} Unable to initialize the legged odometry.", logPrefix);
+        return false;
+    }
+
     ///
     // Reset kinDynObject and floating base integrator
     const auto numberOfJoints = m_robotControl.getJointList().size();
@@ -329,6 +412,7 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     m_currentJointPos.resize(numberOfJoints);
     m_currentJointVel.resize(numberOfJoints);
     m_currentJointVel.setZero();
+
     m_desJointPos.resize(numberOfJoints);
     m_desJointVel.resize(numberOfJoints);
     m_desJointVel.setZero();
@@ -341,54 +425,19 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     m_sensorBridge.getJointPositions(m_currentJointPos);
     m_sensorBridge.getJointPositions(m_desJointPos);
 
-    unsigned counter = 0;
-    constexpr unsigned maxIter = 100;
-    constexpr unsigned timeout = 500;
-    yarp::sig::Vector* base = NULL;
-    while (base == nullptr)
-    {
-        base = m_robotBasePort.read(false);
-        if (++counter == maxIter)
-        {
-            BipedalLocomotion::log()->error("{} Unable to read the base pose.", logPrefix);
-            return false;
-        }
-
-        // Sleep for some while
-        std::this_thread::sleep_for(std::chrono::microseconds(timeout));
-    }
-
-    // TODO remove me
-    Eigen::Vector3d translation = Eigen::Map<Eigen::Vector3d>(base->data(), 3);
-    translation(2) -= 0.0105;
-
-    m_baseTransform.translation(translation);
-    m_baseTransform.quat(Eigen::AngleAxisd((*base)(5), Eigen::Vector3d::UnitZ())
-                         * Eigen::AngleAxisd((*base)(4), Eigen::Vector3d::UnitY())
-                         * Eigen::AngleAxisd((*base)(3), Eigen::Vector3d::UnitX()));
-
-    m_baseVelocity.coeffs() = Eigen::Map<Eigen::Matrix<double, 6, 1>>(base->data() + 6, 6);
-
-    Eigen::Vector3d gravity;
-    gravity.setZero();
-
-    m_kinDynWithDesired.kindyn->setRobotState(m_baseTransform.transform(),
-                                              m_desJointPos,
-                                              iDynTree::make_span(m_baseVelocity.data(),
-                                                                  manif::SE3d::Tangent::DoF),
-                                              m_desJointVel,
-                                              gravity);
-
     constexpr double scaling = 0.5;
-    constexpr double scalingPos = 0.0;
+    constexpr double scalingPos = 1.0;
     // t  0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16  17
     // L |+++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|
     // R |+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++|
     BipedalLocomotion::Contacts::ContactListMap contactListMap;
 
-    manif::SE3d leftTransform(BipedalLocomotion::Conversions::toManifPose(
-        m_kinDynWithDesired.kindyn->getWorldTransform("l_sole")));
-    Eigen::Vector3d leftPosition = leftTransform.translation();
+    Eigen::Vector3d leftPosition = Eigen::Vector3d::Zero();
+    leftPosition(1) = 0.08;
+    manif::SE3d leftTransform(leftPosition, manif::SO3d::Identity());
+
+    contactListMap["left_foot"].setDefaultIndex(
+        m_kinDynWithMeasured.kindyn->model().getFrameIndex("l_sole"));
     contactListMap["left_foot"].addContact(leftTransform, 0.0, 1.0 * scaling);
 
     leftPosition(0) += 0.05 * scalingPos;
@@ -409,13 +458,11 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
 
     // right foot
     // first footstep
-    manif::SE3d rightTransform(BipedalLocomotion::Conversions::toManifPose(
-        m_kinDynWithDesired.kindyn->getWorldTransform("r_sole")));
-
-    Eigen::Vector3d rightPosition = rightTransform.translation();
-
-    BipedalLocomotion::log()->info("Right transform {}", rightTransform);
-
+    Eigen::Vector3d rightPosition = Eigen::Vector3d::Zero();
+    rightPosition(1) = -0.08;
+    manif::SE3d rightTransform(rightPosition, manif::SO3d::Identity());
+    contactListMap["right_foot"].setDefaultIndex(
+        m_kinDynWithMeasured.kindyn->model().getFrameIndex("r_sole"));
     contactListMap["right_foot"].addContact(rightTransform, 0.0, 3.0 * scaling);
 
     rightPosition(0) += 0.1 * scalingPos;
@@ -434,11 +481,15 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     rightTransform.translation(rightPosition);
     contactListMap["right_foot"].addContact(rightTransform, 16.0 * scaling, 17.0 * scaling);
 
-    // feet
+    // contact phase list
+    BipedalLocomotion::Contacts::ContactPhaseList list;
+    list.setLists(contactListMap);
+    m_fixedFootDetector.setContactPhaseList(list);
 
+    // feet
     std::shared_ptr<IParametersHandler> a = std::make_shared<StdImplementation>();
     a->setParameter("sampling_time", m_dT);
-    a->setParameter("step_height", 0.02);
+    a->setParameter("step_height", 0.025);
     a->setParameter("foot_apex_time", 0.5);
     a->setParameter("foot_landing_velocity", 0.0);
     a->setParameter("foot_landing_acceleration", 0.0);
@@ -449,18 +500,32 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     m_leftFootPlanner.setContactList(contactListMap["left_foot"]);
     m_rightFootPlanner.setContactList(contactListMap["right_foot"]);
 
-    BipedalLocomotion::log()->info("COM-------------_> {}",
-                                   m_kinDynWithDesired.kindyn->getCenterOfMassPosition().toString());
+    if (!this->updateFloatingBase())
+    {
+        BipedalLocomotion::log()->error("{} Unable to update the floating base.", logPrefix);
+        return false;
+    }
 
-    BipedalLocomotion::log()
-        ->info("l_sole-------------_> {}",
-               m_kinDynWithDesired.kindyn->getWorldTransform("l_sole").toString());
+    m_baseTransform = m_floatingBaseEstimator.getOutput().basePose;
+    m_baseVelocity = m_floatingBaseEstimator.getOutput().baseTwist;
 
-    BipedalLocomotion::log()
-        ->info("r_sole-------------_> {}",
-               m_kinDynWithDesired.kindyn->getWorldTransform("r_sole").toString());
+    Eigen::Vector3d gravity = Eigen::Vector3d::Zero();
+    gravity(2) = -BipedalLocomotion::Math::StandardAccelerationOfGravitation;
 
-    comPos0 = iDynTree::toEigen(m_kinDynWithDesired.kindyn->getCenterOfMassPosition());
+    m_kinDynWithMeasured.kindyn->setRobotState(m_baseTransform.transform(),
+                                               m_currentJointPos,
+                                               iDynTree::make_span(m_baseVelocity.data(),
+                                                                   manif::SE3d::Tangent::DoF),
+                                               m_currentJointVel,
+                                               gravity);
+
+    /////// update kinDyn
+    m_kinDynWithDesired.kindyn->setRobotState(m_baseTransform.transform(),
+                                              m_desJointPos,
+                                              iDynTree::make_span(m_baseVelocity.data(),
+                                                                  manif::SE3d::Tangent::DoF),
+                                              m_desJointVel,
+                                              gravity);
 
     m_IKandTasks.regularizationTask->setSetPoint(m_desJointPos);
 
@@ -477,13 +542,22 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     ////// centroidal system
     m_centroidalSystem.dynamics = std::make_shared<CentroidalDynamics>();
     m_centroidalSystem.dynamics->setState(
-        {comPos0, Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero()});
+        {iDynTree::toEigen(m_kinDynWithDesired.kindyn->getCenterOfMassPosition()),
+         Eigen::Vector3d::Zero(),
+         Eigen::Vector3d::Zero()});
 
     m_centroidalSystem.integrator = std::make_shared<ForwardEuler<CentroidalDynamics>>();
     m_centroidalSystem.integrator->setIntegrationStep(m_dT);
     m_centroidalSystem.integrator->setDynamicalSystem(m_centroidalSystem.dynamics);
 
     myfile.open("example.txt");
+    myfile << "base_x, base_y, base_z, com_x, com_y, com_z, des_com_x, des_com_y, des_com_z, "
+              "lf_des_x, lf_des_y, lf_des_z, lf_meas_x, lf_meas_y, lf_meas_z, lf_meas_d_x, "
+              "lf_meas_d_y, lf_meas_d_z, rf_des_x, rf_des_y, rf_des_z, rf_meas_x, rf_meas_y, "
+              "rf_meas_z, rf_meas_d_x, rf_meas_d_y, rf_meas_d_z"
+           << std::endl;
+
+    BipedalLocomotion::log()->info("{} The WholeBodyQPBlock has been configured.", logPrefix);
 
     return true;
 }
@@ -528,8 +602,6 @@ bool WholeBodyQPBlock::advance()
     gravity.setZero();
     gravity(2) = -BipedalLocomotion::Math::StandardAccelerationOfGravitation;
 
-    auto startTotal = std::chrono::steady_clock::now();
-    auto start1 = std::chrono::steady_clock::now();
     constexpr auto errorPrefix = "[WholeBodyQPBlock::advance]";
     if (!m_sensorBridge.advance())
     {
@@ -540,32 +612,15 @@ bool WholeBodyQPBlock::advance()
     m_sensorBridge.getJointPositions(m_currentJointPos);
     m_sensorBridge.getJointVelocities(m_currentJointVel);
 
-    auto end1 = std::chrono::steady_clock::now();
-    std::chrono::duration<double, std::milli> elapsed1 = end1 - start1;
-    // BipedalLocomotion::log()->info("sensor bridge - time required {}  ms", (elapsed1).count());
 
-    start1 = std::chrono::steady_clock::now();
-
-    unsigned counter = 0;
-    constexpr unsigned maxIter = 100;
-    constexpr unsigned timeout = 5;
-    yarp::sig::Vector* base = NULL;
-    while (base == nullptr)
+    if (!this->updateFloatingBase())
     {
-        base = m_robotBasePort.read(false);
-        if (++counter == maxIter)
-        {
-            BipedalLocomotion::log()->error("{} Unable to read the base pose.", errorPrefix);
-            return false;
-        }
-
-        // Sleep for some while
-        std::this_thread::sleep_for(std::chrono::microseconds(timeout));
+        BipedalLocomotion::log()->error("{} Unable to update the floating base.", errorPrefix);
+        return false;
     }
 
-    end1 = std::chrono::steady_clock::now();
-    elapsed1 = end1 - start1;
-    // BipedalLocomotion::log()->info("base - time required {}  ms", (elapsed1).count());
+    m_baseTransform = m_floatingBaseEstimator.getOutput().basePose;
+    m_baseVelocity = m_floatingBaseEstimator.getOutput().baseTwist;
 
     m_kinDynWithMeasured.kindyn->setRobotState(m_baseTransform.transform(),
                                                m_currentJointPos,
@@ -574,34 +629,30 @@ bool WholeBodyQPBlock::advance()
                                                m_currentJointVel,
                                                gravity);
 
-    // TODO remove me
-    Eigen::Vector3d translation = Eigen::Map<Eigen::Vector3d>(base->data(), 3);
-    translation(2) -= 0.0105;
+    /////// update kinDyn
+    m_kinDynWithDesired.kindyn->setRobotState(m_baseTransform.transform(),
+                                              m_desJointPos,
+                                              iDynTree::make_span(m_baseVelocity.data(),
+                                                                  manif::SE3d::Tangent::DoF),
+                                              m_desJointVel,
+                                              gravity);
 
-    m_baseTransform.translation(translation);
-    m_baseTransform.quat(Eigen::AngleAxisd((*base)(5), Eigen::Vector3d::UnitZ())
-                         * Eigen::AngleAxisd((*base)(4), Eigen::Vector3d::UnitY())
-                         * Eigen::AngleAxisd((*base)(3), Eigen::Vector3d::UnitX()));
+    if (!m_leftFootPlanner.getOutput().mixedVelocity.coeffs().isZero())
+    {
+        m_IKandTasks.leftFootTask->enableControl();
+    } else
+    {
+        m_IKandTasks.leftFootTask->disableControl();
+    }
 
-    m_baseVelocity.coeffs() = Eigen::Map<Eigen::Matrix<double, 6, 1>>(base->data() + 6, 6);
+    if (!m_rightFootPlanner.getOutput().mixedVelocity.coeffs().isZero())
+    {
+        m_IKandTasks.rightFootTask->enableControl();
+    } else
+    {
+        m_IKandTasks.rightFootTask->disableControl();
+    }
 
-    auto start = std::chrono::steady_clock::now();
-
-    // if (!m_leftFootPlanner.getOutput().mixedVelocity.coeffs().isZero())
-    // {
-    //     m_IKandTasks.leftFootTask->enableControl();
-    // } else
-    // {
-    //     m_IKandTasks.leftFootTask->disableControl();
-    // }
-
-    // if (!m_rightFootPlanner.getOutput().mixedVelocity.coeffs().isZero())
-    // {
-    //     m_IKandTasks.rightFootTask->enableControl();
-    // } else
-    // {
-    //     m_IKandTasks.rightFootTask->disableControl();
-    // }
 
     m_IKandTasks.leftFootTask->setSetPoint(m_leftFootPlanner.getOutput().transform,
                                            m_leftFootPlanner.getOutput().mixedVelocity);
@@ -612,22 +663,24 @@ bool WholeBodyQPBlock::advance()
     m_IKandTasks.comTask->setSetPoint(std::get<0>(m_centroidalSystem.dynamics->getState()),
                                       std::get<1>(m_centroidalSystem.dynamics->getState()));
 
-    double yawLeft
+    const double yawLeft
         = m_leftFootPlanner.getOutput().transform.quat().toRotationMatrix().eulerAngles(2, 1, 0)(0);
 
-    double yawRight
+    const double yawRight
         = m_rightFootPlanner.getOutput().transform.quat().toRotationMatrix().eulerAngles(2, 1, 0)(
             0);
 
     const double meanYaw = std::atan2(std::sin(yawLeft) + std::sin(yawRight),
                                       std::cos(yawLeft) + std::cos(yawRight));
 
-    manif::SO3d chestOrientation = manif::SO3d(Eigen::AngleAxisd(0, Eigen::Vector3d::UnitZ()) * Eigen::AngleAxisd(M_PI/2, Eigen::Vector3d::UnitZ()) * Eigen::AngleAxisd(M_PI/2, Eigen::Vector3d::UnitX()));
+    manif::SO3d chestOrientation
+        = manif::SO3d(Eigen::AngleAxisd(0, Eigen::Vector3d::UnitZ())
+                      * Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitZ())
+                      * Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitX()));
 
-
-        // ((0.0 0.0 1.0),
-        //  (1.0 0.0 0.0),
-        //  (0.0 1.0 0.0));
+    // ((0.0 0.0 1.0),
+    //  (1.0 0.0 0.0),
+    //  (0.0 1.0 0.0));
 
     m_IKandTasks.chestTask->setSetPoint(chestOrientation, manif::SO3d::Tangent::Zero());
 
@@ -636,23 +689,14 @@ bool WholeBodyQPBlock::advance()
         BipedalLocomotion::log()->error("{} Unable to solve the IK problem", errorPrefix);
         return false;
     }
-    auto end = std::chrono::steady_clock::now();
 
     if (shouldAdvance)
     {
+        // advance the fixed foot class
+        m_fixedFootDetector.advance();
         m_leftFootPlanner.advance();
         m_rightFootPlanner.advance();
     }
-    std::chrono::duration<double, std::milli> elapsed = end - start;
-
-    // BipedalLocomotion::log()->info("IK - time required {}  ms", (elapsed).count());
-
-    // double freq = 0.2;
-    // comPos(1)+= 0.07 * std::sin(2 * M_PI * freq * indexSin * m_dT);
-    // Eigen::Vector3d comVel = Eigen::Vector3d::Zero();
-    // comVel(1) = 2 * M_PI * freq * 0.07 * std::cos(2 * M_PI * freq * indexSin * m_dT);
-
-    start = std::chrono::steady_clock::now();
 
     m_system.dynamics->setControlInput({m_IKandTasks.ik->getOutput().baseVelocity.coeffs(),
                                         m_IKandTasks.ik->getOutput().jointVelocity});
@@ -660,25 +704,8 @@ bool WholeBodyQPBlock::advance()
 
     const auto& [basePosition, baseRotation, jointPosition] = m_system.integrator->getSolution();
 
-    end = std::chrono::steady_clock::now();
-    elapsed = end - start;
-    // BipedalLocomotion::log()->info("Integrator - time required {}  ms", (elapsed).count());
-
-    // start =  std::chrono::steady_clock::now();
-
-    // end =  std::chrono::steady_clock::now();
-    // elapsed = end-start;
-    // BipedalLocomotion::log()->info("Set reference - time required {}  ms", (elapsed).count());
-
-    /////// update kinDyn
-    m_kinDynWithDesired.kindyn->setRobotState(m_baseTransform.transform(),
-                                              jointPosition,
-                                              iDynTree::make_span(m_baseVelocity.data(),
-                                                                  manif::SE3d::Tangent::DoF),
-                                              m_IKandTasks.ik->getOutput().jointVelocity,
-                                              gravity);
-
-    // BipedalLocomotion::log()->info("Total - time required {}  ms", (elapsedTotal).count());
+    m_desJointPos = jointPosition;
+    m_desJointVel = m_IKandTasks.ik->getOutput().jointVelocity;
 
     // m_kinDynWithMeasured.kindyn->getCenterOfMassPosition(m_output.com);
     // m_kinDynWithMeasured.kindyn->getCenterOfMassVelocity(m_output.dcom);
@@ -710,16 +737,26 @@ bool WholeBodyQPBlock::advance()
     //     .transpose() << " " << jointPosition.transpose() << " " <<  m_currentJointPos.transpose()
     //     << std::endl;
 
+
+    Eigen::IOFormat CommaInitFmt(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", ", ", "", "", "", "");
     myfile
-        << jointPosition.transpose() << " " << m_currentJointPos.transpose() << " "
-        << m_kinDynWithMeasured.kindyn->getCenterOfMassPosition().toString() << " "
-        << std::get<0>(m_centroidalSystem.dynamics->getState()).transpose() << " "
-        << m_leftFootPlanner.getOutput().transform.translation().transpose() << " "
+        << m_baseTransform.translation().format(CommaInitFmt) << ", "
+        << iDynTree::toEigen(m_kinDynWithMeasured.kindyn->getCenterOfMassPosition())
+               .format(CommaInitFmt)
+        << ", " << std::get<0>(m_centroidalSystem.dynamics->getState()).format(CommaInitFmt) << ", "
+        << m_leftFootPlanner.getOutput().transform.translation().format(CommaInitFmt) << ", "
         << iDynTree::toEigen(m_kinDynWithMeasured.kindyn->getWorldTransform("l_sole").getPosition())
-               .transpose()
-        << " "
+               .format(CommaInitFmt)
+        << ", "
         << iDynTree::toEigen(m_kinDynWithDesired.kindyn->getWorldTransform("l_sole").getPosition())
-               .transpose()
+               .format(CommaInitFmt)
+        << "," << m_rightFootPlanner.getOutput().transform.translation().format(CommaInitFmt)
+        << ", "
+        << iDynTree::toEigen(m_kinDynWithMeasured.kindyn->getWorldTransform("r_sole").getPosition())
+               .format(CommaInitFmt)
+        << ", "
+        << iDynTree::toEigen(m_kinDynWithDesired.kindyn->getWorldTransform("r_sole").getPosition())
+               .format(CommaInitFmt)
         << std::endl;
 
     if (!m_robotControl.setReferences(jointPosition,
@@ -740,5 +777,6 @@ bool WholeBodyQPBlock::isOutputValid() const
 
 bool WholeBodyQPBlock::close()
 {
+    myfile.close();
     return true;
 }

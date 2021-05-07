@@ -37,6 +37,8 @@
 #include <CentroidalMPCWalking/CentroidalMPCBlock.h>
 
 #include <BipedalLocomotion/FloatingBaseEstimators/LeggedOdometry.h>
+#include <BipedalLocomotion/ContactDetectors/FixedFootDetector.h>
+
 #include <yarp/sig/Vector.h>
 #include <yarp/os/BufferedPort.h>
 
@@ -49,6 +51,7 @@ class WholeBodyQPBlock : public BipedalLocomotion::System::Advanceable<
                              BipedalLocomotion::ReducedModelControllers::CentroidalMPCState,
                              CentoidalMPCInput>
 {
+
     typename WholeBodyQPBlock::Output m_output;
     typename WholeBodyQPBlock::Input m_input;
 
@@ -70,6 +73,8 @@ class WholeBodyQPBlock : public BipedalLocomotion::System::Advanceable<
     BipedalLocomotion::RobotInterface::YarpRobotControl m_robotControl; /**< Robot control object. */
     BipedalLocomotion::RobotInterface::YarpSensorBridge m_sensorBridge; /**< Sensor bridge object. */
 
+    BipedalLocomotion::Estimators::LeggedOdometry m_floatingBaseEstimator;
+    BipedalLocomotion::Contacts::FixedFootDetector m_fixedFootDetector;
 
     BipedalLocomotion::Planners::SwingFootPlanner m_leftFootPlanner;
     BipedalLocomotion::Planners::SwingFootPlanner m_rightFootPlanner;
@@ -120,8 +125,14 @@ class WholeBodyQPBlock : public BipedalLocomotion::System::Advanceable<
     bool instantiateIK(
         std::shared_ptr<const BipedalLocomotion::ParametersHandler::IParametersHandler> handler);
 
+    bool instantiateLeggedOdometry(
+        std::shared_ptr<const BipedalLocomotion::ParametersHandler::IParametersHandler> handler,
+        const std::string& modelPath,
+        const std::vector<std::string>& jointLists);
 
     bool createKinDyn(const std::string& modelPath, const std::vector<std::string>& jointLists);
+
+    bool updateFloatingBase();
 
 public:
     bool initialize(std::weak_ptr<const BipedalLocomotion::ParametersHandler::IParametersHandler>
