@@ -19,6 +19,7 @@
 #include <BipedalLocomotion/ParametersHandler/StdImplementation.h>
 #include <BipedalLocomotion/RobotInterface/YarpHelper.h>
 #include <BipedalLocomotion/System/Clock.h>
+#include <BipedalLocomotion/Contacts/ContactListJsonParser.h>
 #include <BipedalLocomotion/TextLogging/Logger.h>
 #include <CentroidalMPCWalking/WholeBodyQPBlock.h>
 
@@ -31,6 +32,8 @@
 #include <thread>
 
 std::ofstream myfile;
+
+double com0z;
 
 using namespace CentroidalMPCWalking;
 using namespace BipedalLocomotion::ParametersHandler;
@@ -425,11 +428,12 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     m_sensorBridge.getJointPositions(m_currentJointPos);
     m_sensorBridge.getJointPositions(m_desJointPos);
 
-    constexpr double scaling = 0.5;
-    constexpr double scalingPos = 1.0;
-    // t  0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16  17
-    // L |+++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|
-    // R |+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++|
+    constexpr double scaling = 1;
+    constexpr double scalingPos = 4.0;
+    constexpr double scalingPosY = 12;
+    // // t  0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16  17  18  19 20  21  22  23  24  25  26  27  28  29
+    // // L |+++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|++++++++++|---|+++++++++++|
+    // // R |+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|++++++++++|---|+++|
     BipedalLocomotion::Contacts::ContactListMap contactListMap;
 
     Eigen::Vector3d leftPosition = Eigen::Vector3d::Zero();
@@ -445,16 +449,32 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     contactListMap["left_foot"].addContact(leftTransform, 2.0 * scaling, 5.0 * scaling);
 
     leftPosition(0) += 0.1 * scalingPos;
+    leftPosition(2)  = 0.01 + 0.01;
+    // leftTransform.quat(Eigen::AngleAxisd(0.1, Eigen::Vector3d::UnitX()));
     leftTransform.translation(leftPosition);
     contactListMap["left_foot"].addContact(leftTransform, 6.0 * scaling, 9.0 * scaling);
 
     leftPosition(0) += 0.1 * scalingPos;
+    leftPosition(2)  = 0.0;
+    leftTransform.quat(manif::SO3d::Identity());
     leftTransform.translation(leftPosition);
     contactListMap["left_foot"].addContact(leftTransform, 10.0 * scaling, 13.0 * scaling);
 
     leftPosition(0) += 0.1 * scalingPos;
     leftTransform.translation(leftPosition);
     contactListMap["left_foot"].addContact(leftTransform, 14.0 * scaling, 17.0 * scaling);
+
+    leftPosition(1) -= 0.01 * scalingPosY;
+    leftTransform.translation(leftPosition);
+    contactListMap["left_foot"].addContact(leftTransform, 18.0 * scaling, 21.0 * scaling);
+
+    leftPosition(1) -= 0.01 * scalingPosY;
+    leftTransform.translation(leftPosition);
+    contactListMap["left_foot"].addContact(leftTransform, 22.0 * scaling, 25.0 * scaling);
+
+    leftPosition(1) -= 0.01 * scalingPosY;
+    leftTransform.translation(leftPosition);
+    contactListMap["left_foot"].addContact(leftTransform, 26.0 * scaling, 29.0 * scaling);
 
     // right foot
     // first footstep
@@ -466,10 +486,14 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     contactListMap["right_foot"].addContact(rightTransform, 0.0, 3.0 * scaling);
 
     rightPosition(0) += 0.1 * scalingPos;
+    rightPosition(2)  = 0.02 + 0.01;
+    // rightTransform.quat(Eigen::AngleAxisd(-0.1, Eigen::Vector3d::UnitX()));
     rightTransform.translation(rightPosition);
     contactListMap["right_foot"].addContact(rightTransform, 4.0 * scaling, 7.0 * scaling);
 
     rightPosition(0) += 0.1 * scalingPos;
+    rightPosition(2)  = 0.0;
+    rightTransform.quat(manif::SO3d::Identity());
     rightTransform.translation(rightPosition);
     contactListMap["right_foot"].addContact(rightTransform, 8.0 * scaling, 11.0 * scaling);
 
@@ -478,10 +502,24 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     contactListMap["right_foot"].addContact(rightTransform, 12.0 * scaling, 15.0 * scaling);
 
     rightPosition(0) += 0.05 * scalingPos;
+    rightPosition(1) -= 0.01 * scalingPosY;
     rightTransform.translation(rightPosition);
-    contactListMap["right_foot"].addContact(rightTransform, 16.0 * scaling, 17.0 * scaling);
+    contactListMap["right_foot"].addContact(rightTransform, 16.0 * scaling, 19.0 * scaling);
+
+    rightPosition(1) -= 0.01 * scalingPosY;
+    rightTransform.translation(rightPosition);
+    contactListMap["right_foot"].addContact(rightTransform, 20.0 * scaling, 23.0 * scaling);
+
+    rightPosition(1) -= 0.01 * scalingPosY;
+    rightTransform.translation(rightPosition);
+    contactListMap["right_foot"].addContact(rightTransform, 24.0 * scaling, 27.0 * scaling);
+
+    rightPosition(1) -= 0.01 * scalingPosY;
+    rightTransform.translation(rightPosition);
+    contactListMap["right_foot"].addContact(rightTransform, 28.0 * scaling, 29.0 * scaling);
 
     // contact phase list
+    // contactListMap = BipedalLocomotion::Contacts::contactListMapFromJson("footsteps.json");
     BipedalLocomotion::Contacts::ContactPhaseList list;
     list.setLists(contactListMap);
     m_fixedFootDetector.setContactPhaseList(list);
@@ -489,7 +527,7 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     // feet
     std::shared_ptr<IParametersHandler> a = std::make_shared<StdImplementation>();
     a->setParameter("sampling_time", m_dT);
-    a->setParameter("step_height", 0.025);
+    a->setParameter("step_height", 0.05);
     a->setParameter("foot_apex_time", 0.5);
     a->setParameter("foot_landing_velocity", 0.0);
     a->setParameter("foot_landing_acceleration", 0.0);
@@ -546,12 +584,27 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
          Eigen::Vector3d::Zero(),
          Eigen::Vector3d::Zero()});
 
+    com0z = m_kinDynWithDesired.kindyn->getCenterOfMassPosition()(2);
+
     m_centroidalSystem.integrator = std::make_shared<ForwardEuler<CentroidalDynamics>>();
     m_centroidalSystem.integrator->setIntegrationStep(m_dT);
     m_centroidalSystem.integrator->setDynamicalSystem(m_centroidalSystem.dynamics);
 
     myfile.open("example.txt");
-    myfile << "base_x, base_y, base_z, com_x, com_y, com_z, des_com_x, des_com_y, des_com_z, "
+    myfile << "torso_pitch_des, torso_roll_des, torso_yaw_des, l_shoulder_pitch_des, "
+              "l_shoulder_roll_des, l_shoulder_yaw_des, l_elbow_des, r_shoulder_pitch_des, "
+              "r_shoulder_roll_des, r_shoulder_yaw_des, r_elbow_des, l_hip_pitch_des, "
+              "l_hip_roll_des, l_hip_yaw_des, l_knee_des, l_ankle_pitch_des, l_ankle_roll_des, "
+              "r_hip_pitch_des, r_hip_roll_des, r_hip_yaw_des, r_knee_des, r_ankle_pitch_des, "
+              "r_ankle_roll_des, "
+              "torso_pitch, torso_roll, torso_yaw, l_shoulder_pitch, "
+              "l_shoulder_roll, l_shoulder_yaw, l_elbow, r_shoulder_pitch, "
+              "r_shoulder_roll, r_shoulder_yaw, r_elbow, l_hip_pitch, "
+              "l_hip_roll, l_hip_yaw, l_knee, l_ankle_pitch, l_ankle_roll, "
+              "r_hip_pitch, r_hip_roll, r_hip_yaw, r_knee, r_ankle_pitch, "
+              "r_ankle_roll, "
+              "base_x, base_y, base_z, com_x, com_y, com_z, des_com_x, "
+              "des_com_y, des_com_z, "
               "lf_des_x, lf_des_y, lf_des_z, lf_meas_x, lf_meas_y, lf_meas_z, lf_meas_d_x, "
               "lf_meas_d_y, lf_meas_d_z, rf_des_x, rf_des_y, rf_des_z, rf_meas_x, rf_meas_y, "
               "rf_meas_z, rf_meas_d_x, rf_meas_d_y, rf_meas_d_z"
@@ -637,21 +690,21 @@ bool WholeBodyQPBlock::advance()
                                               m_desJointVel,
                                               gravity);
 
-    if (!m_leftFootPlanner.getOutput().mixedVelocity.coeffs().isZero())
-    {
-        m_IKandTasks.leftFootTask->enableControl();
-    } else
-    {
-        m_IKandTasks.leftFootTask->disableControl();
-    }
+    // if (!m_leftFootPlanner.getOutput().mixedVelocity.coeffs().isZero())
+    // {
+    //     m_IKandTasks.leftFootTask->enableControl();
+    // } else
+    // {
+    //     m_IKandTasks.leftFootTask->disableControl();
+    // }
 
-    if (!m_rightFootPlanner.getOutput().mixedVelocity.coeffs().isZero())
-    {
-        m_IKandTasks.rightFootTask->enableControl();
-    } else
-    {
-        m_IKandTasks.rightFootTask->disableControl();
-    }
+    // if (!m_rightFootPlanner.getOutput().mixedVelocity.coeffs().isZero())
+    // {
+    //     m_IKandTasks.rightFootTask->enableControl();
+    // } else
+    // {
+    //     m_IKandTasks.rightFootTask->disableControl();
+    // }
 
 
     m_IKandTasks.leftFootTask->setSetPoint(m_leftFootPlanner.getOutput().transform,
@@ -660,29 +713,44 @@ bool WholeBodyQPBlock::advance()
     m_IKandTasks.rightFootTask->setSetPoint(m_rightFootPlanner.getOutput().transform,
                                             m_rightFootPlanner.getOutput().mixedVelocity);
 
-    m_IKandTasks.comTask->setSetPoint(std::get<0>(m_centroidalSystem.dynamics->getState()),
-                                      std::get<1>(m_centroidalSystem.dynamics->getState()));
 
-    const double yawLeft
-        = m_leftFootPlanner.getOutput().transform.quat().toRotationMatrix().eulerAngles(2, 1, 0)(0);
+    Eigen::Vector3d comdes = std::get<0>(m_centroidalSystem.dynamics->getState());
+    // comdes(2) = com0z;
 
-    const double yawRight
-        = m_rightFootPlanner.getOutput().transform.quat().toRotationMatrix().eulerAngles(2, 1, 0)(
-            0);
+    Eigen::Vector3d dcomdes = std::get<1>(m_centroidalSystem.dynamics->getState());
+    // dcomdes(2) = 0;
 
-    const double meanYaw = std::atan2(std::sin(yawLeft) + std::sin(yawRight),
-                                      std::cos(yawLeft) + std::cos(yawRight));
 
-    manif::SO3d chestOrientation
-        = manif::SO3d(Eigen::AngleAxisd(0, Eigen::Vector3d::UnitZ())
-                      * Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitZ())
-                      * Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitX()));
+    m_IKandTasks.comTask->setSetPoint(comdes, dcomdes);
+
+    // const double yawLeft
+    //     = m_leftFootPlanner.getOutput().transform.quat().toRotationMatrix().eulerAngles(2, 1, 0)(0);
+
+    // const double yawRight
+    //     = m_rightFootPlanner.getOutput().transform.quat().toRotationMatrix().eulerAngles(2, 1, 0)(
+    //         0);
+
+    // const double meanYaw = std::atan2(std::sin(yawLeft) + std::sin(yawRight),
+    //                                   std::cos(yawLeft) + std::cos(yawRight));
+
+
+
+
+    // // manif::SO3d chestOrientation
+    // //     = manif::SO3d(Eigen::AngleAxisd(0, Eigen::Vector3d::UnitZ())
+    // //                   * Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitZ())
+    // //                   * Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitX()));
+
+
+    // manif::SO3d chestOrientation
+    //     = manif::SO3d(Eigen::AngleAxisd(meanYaw, Eigen::Vector3d::UnitZ()));
+
 
     // ((0.0 0.0 1.0),
     //  (1.0 0.0 0.0),
     //  (0.0 1.0 0.0));
 
-    m_IKandTasks.chestTask->setSetPoint(chestOrientation, manif::SO3d::Tangent::Zero());
+    m_IKandTasks.chestTask->setSetPoint(manif::SO3d::Identity(), manif::SO3d::Tangent::Zero());
 
     if (!m_IKandTasks.ik->advance())
     {
@@ -737,10 +805,11 @@ bool WholeBodyQPBlock::advance()
     //     .transpose() << " " << jointPosition.transpose() << " " <<  m_currentJointPos.transpose()
     //     << std::endl;
 
-
-    Eigen::IOFormat CommaInitFmt(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", ", ", "", "", "", "");
+    Eigen::IOFormat
+        CommaInitFmt(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", ", ", "", "", "", "");
     myfile
-        << m_baseTransform.translation().format(CommaInitFmt) << ", "
+        << m_desJointPos.format(CommaInitFmt) << ", " << m_currentJointPos.format(CommaInitFmt)
+        << ", " << m_baseTransform.translation().format(CommaInitFmt) << ", "
         << iDynTree::toEigen(m_kinDynWithMeasured.kindyn->getCenterOfMassPosition())
                .format(CommaInitFmt)
         << ", " << std::get<0>(m_centroidalSystem.dynamics->getState()).format(CommaInitFmt) << ", "

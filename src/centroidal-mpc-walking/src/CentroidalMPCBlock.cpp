@@ -5,6 +5,7 @@
  * General Public License v2.1 or any later version.
  */
 
+#include <BipedalLocomotion/Contacts/ContactListJsonParser.h>
 #include <BipedalLocomotion/Contacts/ContactPhaseList.h>
 #include <BipedalLocomotion/Planners/QuinticSpline.h>
 
@@ -17,7 +18,7 @@ using namespace CentroidalMPCWalking;
 using namespace BipedalLocomotion::ParametersHandler;
 
 bool isFirstRun{true};
-Eigen::MatrixXd comTraj(3, 500);
+Eigen::MatrixXd comTraj(3, 1500);
 int indexCoM{0};
 bool CentroidalMPCBlock::initialize(std::weak_ptr<const IParametersHandler> handler)
 {
@@ -50,11 +51,12 @@ bool CentroidalMPCBlock::setInput(const Input& input)
             // left foot
             // first footstep
 
-            constexpr double scaling = 0.5;
-            constexpr double scalingPos = 1.0;
-            // t  0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16  17
-            // L |+++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|
-            // R |+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++|
+    constexpr double scaling = 1;
+    constexpr double scalingPos = 4.0;
+    constexpr double scalingPosY = 12;
+            // // t  0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16  17  18  19 20  21  22  23  24  25  26  27
+            // // L |+++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|++++++++++|---|+++|
+            // // R |+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++|
             BipedalLocomotion::Contacts::ContactListMap contactListMap;
 
             Eigen::Vector3d leftPosition = input.leftFoot.translation();
@@ -66,16 +68,38 @@ bool CentroidalMPCBlock::setInput(const Input& input)
             contactListMap["left_foot"].addContact(leftTransform, 2.0 * scaling, 5.0 * scaling);
 
             leftPosition(0) += 0.1 * scalingPos;
+            leftPosition(2)  = 0.01 + 0.01;
+            // leftTransform.quat(Eigen::AngleAxisd(0.1, Eigen::Vector3d::UnitX()));
             leftTransform.translation(leftPosition);
             contactListMap["left_foot"].addContact(leftTransform, 6.0 * scaling, 9.0 * scaling);
 
             leftPosition(0) += 0.1 * scalingPos;
+            leftPosition(2)  = 0.0;
+            leftTransform.quat(manif::SO3d::Identity());
             leftTransform.translation(leftPosition);
             contactListMap["left_foot"].addContact(leftTransform, 10.0 * scaling, 13.0 * scaling);
+
 
             leftPosition(0) += 0.1 * scalingPos;
             leftTransform.translation(leftPosition);
             contactListMap["left_foot"].addContact(leftTransform, 14.0 * scaling, 17.0 * scaling);
+
+            leftPosition(1) -= 0.01 * scalingPosY;
+            leftTransform.translation(leftPosition);
+            contactListMap["left_foot"].addContact(leftTransform, 18.0 * scaling, 21.0 * scaling);
+
+            leftPosition(1) -= 0.01 * scalingPosY;
+            leftTransform.translation(leftPosition);
+            contactListMap["left_foot"].addContact(leftTransform, 22.0 * scaling, 25.0 * scaling);
+
+            leftPosition(1) -= 0.01 * scalingPosY;
+            leftTransform.translation(leftPosition);
+            contactListMap["left_foot"].addContact(leftTransform, 26.0 * scaling, 29.0 * scaling);
+
+
+            // // t  0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16  17  18  19 20  21  22  23  24  25  26  27
+            // // L |+++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|++++++++++|---|+++|
+            // // R |+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++|
 
             // right foot
             // first footstep
@@ -85,10 +109,14 @@ bool CentroidalMPCBlock::setInput(const Input& input)
             contactListMap["right_foot"].addContact(rightTransform, 0.0, 3.0 * scaling);
 
             rightPosition(0) += 0.1 * scalingPos;
+            rightPosition(2)  = 0.02 + 0.01;
+            // rightTransform.quat(Eigen::AngleAxisd(-0.1, Eigen::Vector3d::UnitX()));
             rightTransform.translation(rightPosition);
             contactListMap["right_foot"].addContact(rightTransform, 4.0 * scaling, 7.0 * scaling);
 
             rightPosition(0) += 0.1 * scalingPos;
+            rightPosition(2)  = 0.0;
+            rightTransform.quat(manif::SO3d::Identity());
             rightTransform.translation(rightPosition);
             contactListMap["right_foot"].addContact(rightTransform, 8.0 * scaling, 11.0 * scaling);
 
@@ -97,8 +125,25 @@ bool CentroidalMPCBlock::setInput(const Input& input)
             contactListMap["right_foot"].addContact(rightTransform, 12.0 * scaling, 15.0 * scaling);
 
             rightPosition(0) += 0.05 * scalingPos;
+            rightPosition(1) -= 0.01 * scalingPosY;
             rightTransform.translation(rightPosition);
-            contactListMap["right_foot"].addContact(rightTransform, 16.0 * scaling, 17.0 * scaling);
+            contactListMap["right_foot"].addContact(rightTransform, 16.0 * scaling, 19.0 * scaling);
+
+            rightPosition(1) -= 0.01 * scalingPosY;
+            rightTransform.translation(rightPosition);
+            contactListMap["right_foot"].addContact(rightTransform, 20.0 * scaling, 23.0 * scaling);
+
+
+            rightPosition(1) -= 0.01 * scalingPosY;
+            rightTransform.translation(rightPosition);
+            contactListMap["right_foot"].addContact(rightTransform, 24.0 * scaling, 27.0 * scaling);
+
+            rightPosition(1) -= 0.01 * scalingPosY;
+            rightTransform.translation(rightPosition);
+            contactListMap["right_foot"].addContact(rightTransform, 28.0 * scaling, 29.0 * scaling);
+
+
+            // contactListMap = BipedalLocomotion::Contacts::contactListMapFromJson("footsteps.json");
             m_phaseList.setLists(contactListMap);
 
             std::vector<Eigen::VectorXd> comKnots;
@@ -146,7 +191,8 @@ bool CentroidalMPCBlock::setInput(const Input& input)
 
             Eigen::Vector3d velocity, acceleration;
 
-            for (int i = 0; i < 170 / scaling; i++)
+            int tempInt = 1000;
+            for (int i = 0; i < tempInt / scaling; i++)
             {
                 // TODO remove me
                 comSpline.evaluatePoint(i * 0.1, comTraj.col(i), velocity, acceleration);
@@ -155,7 +201,7 @@ bool CentroidalMPCBlock::setInput(const Input& input)
             // i = 3
             // * *
             // 1 2 3 4 5
-            comTraj.rightCols(500 - 169).colwise() = comTraj.col(169);
+            comTraj.rightCols(comTraj.cols() - tempInt).colwise() = comTraj.col(tempInt-1);
         }
 
         return m_controller.setState(input.com, input.dcom, input.angularMomentum);
