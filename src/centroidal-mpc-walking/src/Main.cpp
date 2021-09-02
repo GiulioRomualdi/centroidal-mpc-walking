@@ -10,6 +10,7 @@
 
 #include <BipedalLocomotion/ParametersHandler/YarpImplementation.h>
 #include <BipedalLocomotion/System/AdvanceableRunner.h>
+#include <BipedalLocomotion/System/Barrier.h>
 #include <BipedalLocomotion/System/Clock.h>
 #include <BipedalLocomotion/System/QuitHandler.h>
 #include <BipedalLocomotion/System/SharedResource.h>
@@ -101,8 +102,21 @@ int main(int argc, char* argv[])
         wholeBodyRunner.stop();
     });
 
-    auto threadWBC = wholeBodyRunner.run();
-    auto threadMPC = centroidalMPCRunner.run();
+    // Run the threads
+    BipedalLocomotion::System::Barrier barrier(2);
+
+    auto threadWBC = wholeBodyRunner.run(barrier);
+    auto threadMPC = centroidalMPCRunner.run(barrier);
+
+    while (wholeBodyRunner.isRunning() && centroidalMPCRunner.isRunning())
+    {
+        using namespace std::chrono_literals;
+        constexpr auto delay = 200ms;
+        BipedalLocomotion::clock().sleepFor(delay);
+    }
+
+    centroidalMPCRunner.stop();
+    wholeBodyRunner.stop();
 
     if (threadMPC.joinable())
     {
