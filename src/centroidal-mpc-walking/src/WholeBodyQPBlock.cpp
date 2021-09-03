@@ -11,6 +11,7 @@
 #include <iDynTree/Model/Model.h>
 
 #include <BipedalLocomotion/ContactDetectors/FixedFootDetector.h>
+#include <BipedalLocomotion/Contacts/ContactListJsonParser.h>
 #include <BipedalLocomotion/Conversions/ManifConversions.h>
 #include <BipedalLocomotion/FloatingBaseEstimators/LeggedOdometry.h>
 #include <BipedalLocomotion/FloatingBaseEstimators/ModelComputationsHelper.h>
@@ -19,7 +20,6 @@
 #include <BipedalLocomotion/ParametersHandler/StdImplementation.h>
 #include <BipedalLocomotion/RobotInterface/YarpHelper.h>
 #include <BipedalLocomotion/System/Clock.h>
-#include <BipedalLocomotion/Contacts/ContactListJsonParser.h>
 #include <BipedalLocomotion/TextLogging/Logger.h>
 #include <CentroidalMPCWalking/WholeBodyQPBlock.h>
 
@@ -38,7 +38,8 @@ double com0z;
 using namespace CentroidalMPCWalking;
 using namespace BipedalLocomotion::ParametersHandler;
 
-constexpr double m_dT{0.001};
+constexpr double m_dT{0.01};
+double absoluteTime{0};
 
 bool WholeBodyQPBlock::createKinDyn(const std::string& modelPath,
                                     const std::vector<std::string>& jointLists)
@@ -75,8 +76,8 @@ bool WholeBodyQPBlock::instantiateLeggedOdometry(std::shared_ptr<const IParamete
     handlerKinDyn->setParameter("joints_list", jointLists);
     handlerKinDyn->setParameter("model_file_name", modelPath);
 
-    auto kinDyn = BipedalLocomotion::Estimators::constructKinDynComputationsDescriptor(handlerKinDyn);
-
+    auto kinDyn
+        = BipedalLocomotion::Estimators::constructKinDynComputationsDescriptor(handlerKinDyn);
 
     if (!m_floatingBaseEstimator.initialize(handler->getGroup("FLOATING_BASE_ESTIMATOR"),
                                             kinDyn.kindyn))
@@ -104,11 +105,9 @@ bool WholeBodyQPBlock::instantiateIK(std::shared_ptr<const IParametersHandler> h
 
     handler->getGroup("REGULARIZATION_TASK").lock()->getParameter("weight", weightRegularization);
 
-
     Eigen::Vector3d weightChest;
 
     handler->getGroup("CHEST_TASK").lock()->getParameter("weight", weightChest);
-
 
     BipedalLocomotion::System::VariablesHandler variables;
     variables.addVariable("robotVelocity",
@@ -284,7 +283,6 @@ bool WholeBodyQPBlock::updateFloatingBase()
     {
         // TODO Please change the signature of setContactStatus
         const auto frameName = m_kinDynWithDesired.kindyn->model().getFrameName(foot.index);
-
         if (!m_floatingBaseEstimator.setContactStatus(frameName,
                                                       foot.isActive,
                                                       foot.switchTime,
@@ -429,11 +427,14 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     m_sensorBridge.getJointPositions(m_desJointPos);
 
     constexpr double scaling = 1;
-    constexpr double scalingPos = 4.0;
-    constexpr double scalingPosY = 12;
-    // // t  0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16  17  18  19 20  21  22  23  24  25  26  27  28  29
-    // // L |+++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|++++++++++|---|+++++++++++|
-    // // R |+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|++++++++++|---|+++|
+    constexpr double scalingPos = 2.0;
+    constexpr double scalingPosY = 0;
+    // // t  0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16  17  18  19 20  21
+    // 22  23  24  25  26  27  28  29
+    // // L
+    // |+++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|++++++++++|---|+++++++++++|
+    // // R
+    // |+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|++++++++++|---|+++|
     BipedalLocomotion::Contacts::ContactListMap contactListMap;
 
     Eigen::Vector3d leftPosition = Eigen::Vector3d::Zero();
@@ -449,13 +450,13 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     contactListMap["left_foot"].addContact(leftTransform, 2.0 * scaling, 5.0 * scaling);
 
     leftPosition(0) += 0.1 * scalingPos;
-    leftPosition(2)  = 0.01 + 0.01;
+    leftPosition(2) = 0.0 + 0.0;
     // leftTransform.quat(Eigen::AngleAxisd(0.1, Eigen::Vector3d::UnitX()));
     leftTransform.translation(leftPosition);
     contactListMap["left_foot"].addContact(leftTransform, 6.0 * scaling, 9.0 * scaling);
 
     leftPosition(0) += 0.1 * scalingPos;
-    leftPosition(2)  = 0.0;
+    leftPosition(2) = 0.0;
     leftTransform.quat(manif::SO3d::Identity());
     leftTransform.translation(leftPosition);
     contactListMap["left_foot"].addContact(leftTransform, 10.0 * scaling, 13.0 * scaling);
@@ -486,14 +487,10 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     contactListMap["right_foot"].addContact(rightTransform, 0.0, 3.0 * scaling);
 
     rightPosition(0) += 0.1 * scalingPos;
-    rightPosition(2)  = 0.02 + 0.01;
-    // rightTransform.quat(Eigen::AngleAxisd(-0.1, Eigen::Vector3d::UnitX()));
     rightTransform.translation(rightPosition);
     contactListMap["right_foot"].addContact(rightTransform, 4.0 * scaling, 7.0 * scaling);
 
     rightPosition(0) += 0.1 * scalingPos;
-    rightPosition(2)  = 0.0;
-    rightTransform.quat(manif::SO3d::Identity());
     rightTransform.translation(rightPosition);
     contactListMap["right_foot"].addContact(rightTransform, 8.0 * scaling, 11.0 * scaling);
 
@@ -501,7 +498,7 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     rightTransform.translation(rightPosition);
     contactListMap["right_foot"].addContact(rightTransform, 12.0 * scaling, 15.0 * scaling);
 
-    rightPosition(0) += 0.05 * scalingPos;
+    rightPosition(0) += 0.0 * scalingPos;
     rightPosition(1) -= 0.01 * scalingPosY;
     rightTransform.translation(rightPosition);
     contactListMap["right_foot"].addContact(rightTransform, 16.0 * scaling, 19.0 * scaling);
@@ -527,7 +524,7 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     // feet
     std::shared_ptr<IParametersHandler> a = std::make_shared<StdImplementation>();
     a->setParameter("sampling_time", m_dT);
-    a->setParameter("step_height", 0.05);
+    a->setParameter("step_height", 0.02);
     a->setParameter("foot_apex_time", 0.5);
     a->setParameter("foot_landing_velocity", 0.0);
     a->setParameter("foot_landing_acceleration", 0.0);
@@ -569,9 +566,8 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
 
     using namespace BipedalLocomotion::ContinuousDynamicalSystem;
     m_system.dynamics = std::make_shared<FloatingBaseSystemKinematics>();
-    m_system.dynamics->setState({m_baseTransform.transform().topRightCorner<3, 1>(),
-                                 m_baseTransform.transform().topLeftCorner<3, 3>(),
-                                 m_desJointPos});
+    m_system.dynamics->setState(
+        {m_baseTransform.translation(), m_baseTransform.asSO3(), m_desJointPos});
 
     m_system.integrator = std::make_shared<ForwardEuler<FloatingBaseSystemKinematics>>();
     m_system.integrator->setIntegrationStep(m_dT);
@@ -644,7 +640,8 @@ bool WholeBodyQPBlock::advance()
 
         if (force.norm() > 0.01)
         {
-            m_centroidalSystem.dynamics->setControlInput(m_input.contacts);
+            Eigen::Vector3d dummy = Eigen::Vector3d::Zero();
+            m_centroidalSystem.dynamics->setControlInput({m_input.contacts, dummy});
             m_centroidalSystem.integrator->integrate(0, m_dT);
         }
 
@@ -664,7 +661,6 @@ bool WholeBodyQPBlock::advance()
 
     m_sensorBridge.getJointPositions(m_currentJointPos);
     m_sensorBridge.getJointVelocities(m_currentJointVel);
-
 
     if (!this->updateFloatingBase())
     {
@@ -706,13 +702,11 @@ bool WholeBodyQPBlock::advance()
     //     m_IKandTasks.rightFootTask->disableControl();
     // }
 
-
     m_IKandTasks.leftFootTask->setSetPoint(m_leftFootPlanner.getOutput().transform,
                                            m_leftFootPlanner.getOutput().mixedVelocity);
 
     m_IKandTasks.rightFootTask->setSetPoint(m_rightFootPlanner.getOutput().transform,
                                             m_rightFootPlanner.getOutput().mixedVelocity);
-
 
     Eigen::Vector3d comdes = std::get<0>(m_centroidalSystem.dynamics->getState());
     // comdes(2) = com0z;
@@ -720,31 +714,27 @@ bool WholeBodyQPBlock::advance()
     Eigen::Vector3d dcomdes = std::get<1>(m_centroidalSystem.dynamics->getState());
     // dcomdes(2) = 0;
 
-
     m_IKandTasks.comTask->setSetPoint(comdes, dcomdes);
 
     // const double yawLeft
-    //     = m_leftFootPlanner.getOutput().transform.quat().toRotationMatrix().eulerAngles(2, 1, 0)(0);
+    //     = m_leftFootPlanner.getOutput().transform.quat().toRotationMatrix().eulerAngles(2, 1,
+    //     0)(0);
 
     // const double yawRight
-    //     = m_rightFootPlanner.getOutput().transform.quat().toRotationMatrix().eulerAngles(2, 1, 0)(
+    //     = m_rightFootPlanner.getOutput().transform.quat().toRotationMatrix().eulerAngles(2, 1,
+    //     0)(
     //         0);
 
     // const double meanYaw = std::atan2(std::sin(yawLeft) + std::sin(yawRight),
     //                                   std::cos(yawLeft) + std::cos(yawRight));
-
-
-
 
     // // manif::SO3d chestOrientation
     // //     = manif::SO3d(Eigen::AngleAxisd(0, Eigen::Vector3d::UnitZ())
     // //                   * Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitZ())
     // //                   * Eigen::AngleAxisd(M_PI / 2, Eigen::Vector3d::UnitX()));
 
-
     // manif::SO3d chestOrientation
     //     = manif::SO3d(Eigen::AngleAxisd(meanYaw, Eigen::Vector3d::UnitZ()));
-
 
     // ((0.0 0.0 1.0),
     //  (1.0 0.0 0.0),
@@ -764,6 +754,13 @@ bool WholeBodyQPBlock::advance()
         m_fixedFootDetector.advance();
         m_leftFootPlanner.advance();
         m_rightFootPlanner.advance();
+
+        absoluteTime += m_dT;
+        if (absoluteTime > 14.5)
+        {
+            BipedalLocomotion::log()->error("{} Experiment ended", errorPrefix);
+            return false;
+        }
     }
 
     m_system.dynamics->setControlInput({m_IKandTasks.ik->getOutput().baseVelocity.coeffs(),
@@ -798,10 +795,12 @@ bool WholeBodyQPBlock::advance()
     //     << m_kinDynWithMeasured.kindyn->getCenterOfMassPosition().toString() << " "
     //     << std::get<0>(m_centroidalSystem.dynamics->getState()).transpose() << " "
     //     << m_leftFootPlanner.getOutput().transform.translation().transpose() << " "
-    //     << iDynTree::toEigen(m_kinDynWithMeasured.kindyn->getWorldTransform("l_sole").getPosition())
+    //     <<
+    //     iDynTree::toEigen(m_kinDynWithMeasured.kindyn->getWorldTransform("l_sole").getPosition())
     //            .transpose()
     //     << " "
-    //     << iDynTree::toEigen(m_kinDynWithDesired.kindyn->getWorldTransform("l_sole").getPosition())
+    //     <<
+    //     iDynTree::toEigen(m_kinDynWithDesired.kindyn->getWorldTransform("l_sole").getPosition())
     //     .transpose() << " " << jointPosition.transpose() << " " <<  m_currentJointPos.transpose()
     //     << std::endl;
 
