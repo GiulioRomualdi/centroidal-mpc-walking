@@ -5,14 +5,13 @@
  * General Public License v2.1 or any later version.
  */
 
-
 #ifndef CENTROIDAL_MCP_WALKING_WHOLE_BODY_QP_BLOCK_H
 #define CENTROIDAL_MCP_WALKING_WHOLE_BODY_QP_BLOCK_H
-
 
 #include <string>
 #include <map>
 #include <memory>
+#include <unordered_map>
 
 #include <Eigen/Dense>
 
@@ -20,6 +19,8 @@
 #include <BipedalLocomotion/Planners/SwingFootPlanner.h>
 #include <BipedalLocomotion/ContinuousDynamicalSystem/ForwardEuler.h>
 #include <BipedalLocomotion/ContinuousDynamicalSystem/CentroidalDynamics.h>
+#include <BipedalLocomotion/ContinuousDynamicalSystem/LinearTimeInvariantSystem.h>
+
 #include <BipedalLocomotion/Contacts/Contact.h>
 #include <BipedalLocomotion/ParametersHandler/IParametersHandler.h>
 #include <BipedalLocomotion/RobotInterface/YarpRobotControl.h>
@@ -38,6 +39,8 @@
 
 #include <BipedalLocomotion/FloatingBaseEstimators/LeggedOdometry.h>
 #include <BipedalLocomotion/ContactDetectors/FixedFootDetector.h>
+
+#include <BipedalLocomotion/SimplifiedModelControllers/CoMZMPController.h>
 
 #include <yarp/sig/Vector.h>
 #include <yarp/os/BufferedPort.h>
@@ -68,7 +71,17 @@ class WholeBodyQPBlock : public BipedalLocomotion::System::Advanceable<
     manif::SE3d m_baseTransform;
     manif::SE3d::Tangent m_baseVelocity;
 
-    BipedalLocomotion::RobotInterface::PolyDriverDescriptor m_controlBoard; /**< Control board remapper. */
+    BipedalLocomotion::RobotInterface::PolyDriverDescriptor m_controlBoard; /**< Control board
+                                                                               remapper. */
+
+    struct ContactWrenchHandler
+    {
+        BipedalLocomotion::RobotInterface::PolyDriverDescriptor polyDriverDescriptor;
+        BipedalLocomotion::Math::Wrenchd wrench;
+    };
+
+    std::unordered_map<std::string, ContactWrenchHandler> m_leftFootContacWrenches;
+    std::unordered_map<std::string, ContactWrenchHandler> m_rightFootContacWrenches;
 
     BipedalLocomotion::RobotInterface::YarpRobotControl m_robotControl; /**< Robot control object. */
     BipedalLocomotion::RobotInterface::YarpSensorBridge m_sensorBridge; /**< Sensor bridge object. */
@@ -78,6 +91,8 @@ class WholeBodyQPBlock : public BipedalLocomotion::System::Advanceable<
 
     BipedalLocomotion::Planners::SwingFootPlanner m_leftFootPlanner;
     BipedalLocomotion::Planners::SwingFootPlanner m_rightFootPlanner;
+
+  BipedalLocomotion::SimplifiedModelControllers::CoMZMPController m_CoMZMPController;
 
     struct InverseKinematicsAndTasks
     {
@@ -99,6 +114,17 @@ class WholeBodyQPBlock : public BipedalLocomotion::System::Advanceable<
             dynamics;
     };
     CentroidalDynamicsIntegrator m_centroidalSystem;
+
+    struct CenterOfMassIntegrator
+    {
+        std::shared_ptr<BipedalLocomotion::ContinuousDynamicalSystem::ForwardEuler<
+            BipedalLocomotion::ContinuousDynamicalSystem::LinearTimeInvariantSystem>>
+            integrator;
+        std::shared_ptr<BipedalLocomotion::ContinuousDynamicalSystem::LinearTimeInvariantSystem>
+            dynamics;
+    };
+    CenterOfMassIntegrator m_comSystem;
+
 
     struct SystemAndIntegrator
     {
@@ -134,19 +160,32 @@ class WholeBodyQPBlock : public BipedalLocomotion::System::Advanceable<
 
     bool updateFloatingBase();
 
-public:
-    bool initialize(std::weak_ptr<const BipedalLocomotion::ParametersHandler::IParametersHandler>
-                        handler) override;
+    bool createAllContactWrenchesDriver(
+        std::shared_ptr<const BipedalLocomotion::ParametersHandler::IParametersHandler> handler);
 
-    const Output& getOutput() const override;
+    BipedalLocomotion::RobotInterface::PolyDriverDescriptor createContactWrenchDriver(
+        std::weak_ptr<const BipedalLocomotion::ParametersHandler::IParametersHandler> handler,
+        const std::string& local);
 
-    bool setInput(const Input& input) override;
+  bool evaluateZMP(Eigen::Ref<Eigen::Vector2d> zmp);
 
-    bool advance() override;
+  Eigen::Vector2d computeDesiredZMP(
+      const std::map<std::string, BipedalLocomotion::Contacts::ContactWithCorners>& contacts);
 
-    bool isOutputValid() const override;
+  public:
+  bool
+  initialize(std::weak_ptr<const BipedalLocomotion::ParametersHandler::IParametersHandler> handler)
+      override;
 
-    bool close() override;
+  const Output& getOutput() const override;
+
+  bool setInput(const Input& input) override;
+
+  bool advance() override;
+
+  bool isOutputValid() const override;
+
+  bool close() override;
 };
 } // namespace System
 

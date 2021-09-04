@@ -5,6 +5,11 @@
  * General Public License v2.1 or any later version.
  */
 
+#include <BipedalLocomotion/ContinuousDynamicalSystem/LinearTimeInvariantSystem.h>
+#include <BipedalLocomotion/Math/Wrench.h>
+#include <Eigen/src/Core/Matrix.h>
+#include <chrono>
+#include <manif/impl/se3/SE3.h>
 #include <yarp/os/RFModule.h>
 
 #include <iDynTree/Core/SpatialMomentum.h>
@@ -259,6 +264,16 @@ bool WholeBodyQPBlock::instantiateSensorBridge(std::shared_ptr<const IParameters
 
     yarp::dev::PolyDriverList list;
     list.push(m_controlBoard.poly.get(), m_controlBoard.key.c_str());
+    for (auto& [key, driver] : m_leftFootContacWrenches)
+    {
+        list.push(driver.polyDriverDescriptor.poly.get(), key.c_str());
+    }
+
+    for (auto& [key, driver] : m_rightFootContacWrenches)
+    {
+        list.push(driver.polyDriverDescriptor.poly.get(), key.c_str());
+    }
+
     if (!m_sensorBridge.setDriversList(list))
     {
         BipedalLocomotion::log()->error("{} Unable to set the driver list.", errorPrefix);
@@ -345,6 +360,91 @@ bool WholeBodyQPBlock::createPolydriver(std::shared_ptr<const IParametersHandler
     return true;
 }
 
+BipedalLocomotion::RobotInterface::PolyDriverDescriptor
+WholeBodyQPBlock::createContactWrenchDriver(std::weak_ptr<const IParametersHandler> handler,
+                                            const std::string& local)
+{
+    auto ptr = handler.lock();
+    if (ptr == nullptr)
+    {
+        return BipedalLocomotion::RobotInterface::PolyDriverDescriptor();
+    }
+    auto tmp = ptr->clone();
+    tmp->setParameter("local_prefix", local);
+    return BipedalLocomotion::RobotInterface::constructGenericSensorClient(tmp);
+}
+
+bool WholeBodyQPBlock::createAllContactWrenchesDriver(
+    std::shared_ptr<const IParametersHandler> handler)
+{
+    constexpr auto errorPrefix = "[WholeBodyQPBlock::createGenericSensorClient]";
+
+    std::string localPrefix;
+    if (!handler->getParameter("name", localPrefix))
+    {
+        BipedalLocomotion::log()->error("{} Unable to find the name.", errorPrefix);
+        return false;
+    }
+
+    auto ptr = handler->getGroup("CONTACT_WRENCHES").lock();
+    if (ptr == nullptr)
+    {
+        BipedalLocomotion::log()->error("{} Robot interface options is empty.", errorPrefix);
+        return false;
+    }
+
+    std::vector<std::string> contactWrenchClients;
+    if (!ptr->getParameter("left_contact_wrenches_group", contactWrenchClients))
+    {
+        BipedalLocomotion::log()->error("{} Unable to find the left contact wrench group.",
+                                        errorPrefix);
+        return false;
+    }
+
+    for (const auto& wrench : contactWrenchClients)
+    {
+        BipedalLocomotion::RobotInterface::PolyDriverDescriptor descriptor
+            = this->createContactWrenchDriver(ptr->getGroup(wrench), localPrefix);
+
+        if (!descriptor.isValid())
+        {
+            BipedalLocomotion::log()->error("{} The generic sensor client for the wrench named {} "
+                                            "cannot be opened.",
+                                            errorPrefix,
+                                            wrench);
+            return false;
+        }
+
+        m_leftFootContacWrenches[descriptor.key].polyDriverDescriptor = descriptor;
+    }
+
+    if (!ptr->getParameter("right_contact_wrenches_group", contactWrenchClients))
+    {
+        BipedalLocomotion::log()->error("{} Unable to find the right contact wrench group.",
+                                        errorPrefix);
+        return false;
+    }
+
+    for (const auto& wrench : contactWrenchClients)
+    {
+        BipedalLocomotion::RobotInterface::PolyDriverDescriptor descriptor
+            = this->createContactWrenchDriver(ptr->getGroup(wrench), localPrefix);
+
+        if (!descriptor.isValid())
+        {
+            BipedalLocomotion::log()->error("{} The generic sensor client for the wrench named {} "
+                                            "cannot be opened.",
+                                            errorPrefix,
+                                            wrench);
+            return false;
+        }
+
+        m_rightFootContacWrenches[descriptor.key].polyDriverDescriptor = descriptor;
+    }
+
+    return true;
+}
+
 bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handler)
 {
     constexpr auto logPrefix = "[WholeBodyQPBlock::initialize]";
@@ -357,6 +457,14 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
         BipedalLocomotion::log()->error("{} Unable to create the polydriver.", logPrefix);
         return false;
     }
+    if (!this->createAllContactWrenchesDriver(parametersHandler))
+    {
+        BipedalLocomotion::log()->error("{} Unable to create the contact wrench drivers.", logPrefix);
+        return false;
+    }
+
+    // TODO remove me
+    std::this_thread::sleep_for(std::chrono::duration<double>(1));
 
     BipedalLocomotion::log()->info("{} Create the robot control helper.", logPrefix);
     if (!this->initializeRobotControl(parametersHandler))
@@ -405,6 +513,14 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
         BipedalLocomotion::log()->error("{} Unable to initialize the legged odometry.", logPrefix);
         return false;
     }
+
+    if (!this->m_CoMZMPController.initialize(parametersHandler->getGroup("COM_ZMP_CONTROLLER")))
+    {
+        BipedalLocomotion::log()->error("{} Unable to initialize the CoM-ZMP Controller.",
+                                        logPrefix);
+        return false;
+    }
+
 
     ///
     // Reset kinDynObject and floating base integrator
@@ -586,6 +702,16 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     m_centroidalSystem.integrator->setIntegrationStep(m_dT);
     m_centroidalSystem.integrator->setDynamicalSystem(m_centroidalSystem.dynamics);
 
+
+    m_comSystem.dynamics = std::make_shared<LinearTimeInvariantSystem>();
+    m_comSystem.dynamics->setSystemMatrices(Eigen::Matrix2d::Zero(), Eigen::Matrix2d::Identity());
+    m_comSystem.dynamics->setState(
+        {iDynTree::toEigen(m_kinDynWithDesired.kindyn->getCenterOfMassPosition()).head<2>()});
+
+    m_comSystem.integrator = std::make_shared<ForwardEuler<LinearTimeInvariantSystem>>();
+    m_comSystem.integrator->setIntegrationStep(m_dT);
+    m_comSystem.integrator->setDynamicalSystem(m_comSystem.dynamics);
+
     myfile.open("example.txt");
     myfile << "torso_pitch_des, torso_roll_des, torso_yaw_des, l_shoulder_pitch_des, "
               "l_shoulder_roll_des, l_shoulder_yaw_des, l_elbow_des, r_shoulder_pitch_des, "
@@ -603,7 +729,8 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
               "des_com_y, des_com_z, "
               "lf_des_x, lf_des_y, lf_des_z, lf_meas_x, lf_meas_y, lf_meas_z, lf_meas_d_x, "
               "lf_meas_d_y, lf_meas_d_z, rf_des_x, rf_des_y, rf_des_z, rf_meas_x, rf_meas_y, "
-              "rf_meas_z, rf_meas_d_x, rf_meas_d_y, rf_meas_d_z"
+              "rf_meas_z, rf_meas_d_x, rf_meas_d_y, rf_meas_d_z , zmp_des_x, zmp_des_y, "
+              "zmp_meas_x, zmp_meas_y"
            << std::endl;
 
     BipedalLocomotion::log()->info("{} The WholeBodyQPBlock has been configured.", logPrefix);
@@ -622,9 +749,110 @@ bool WholeBodyQPBlock::setInput(const Input& input)
     return true;
 }
 
-bool WholeBodyQPBlock::advance()
+bool WholeBodyQPBlock::evaluateZMP(Eigen::Ref<Eigen::Vector2d> zmp)
+{
+    using namespace BipedalLocomotion;
+    Eigen::Vector3d zmpRight, zmpLeft;
+    zmpLeft.setZero();
+    zmpRight.setZero();
+    double totalZ = 0;
+
+
+    Math::Wrenchd leftWrench = Math::Wrenchd::Zero();
+    for (const auto& [key, value] : m_leftFootContacWrenches)
+    {
+        leftWrench += value.wrench;
+    }
+    Math::Wrenchd rightWrench = Math::Wrenchd::Zero();
+    for (const auto& [key, value] : m_rightFootContacWrenches)
+    {
+        rightWrench += value.wrench;
+    }
+
+    double zmpLeftDefined = 0.0, zmpRightDefined = 0.0;
+    if (rightWrench.force()(2) < 0.001)
+        zmpRightDefined = 0.0;
+    else
+    {
+        zmpRight(0) = -rightWrench.torque()(1) / rightWrench.force()(2);
+        zmpRight(1) = rightWrench.torque()(0) / rightWrench.force()(2);
+        zmpRight(2) = 0.0;
+        zmpRightDefined = 1.0;
+        totalZ += rightWrench.force()(2);
+    }
+
+    if (leftWrench.force()(2) < 0.001)
+        zmpLeftDefined = 0.0;
+    else
+    {
+        zmpLeft(0) = -leftWrench.torque()(1) / leftWrench.force()(2);
+        zmpLeft(1) = leftWrench.torque()(0) / leftWrench.force()(2);
+        zmpLeft(2) = 0.0;
+        zmpLeftDefined = 1.0;
+        totalZ += leftWrench.force()(2);
+    }
+
+    if (totalZ < 0.1)
+    {
+        BipedalLocomotion::log()->error("[WholeBodyQPBlock::evaluateZMP] The total z-component of "
+                                        "contact wrenches is too low.");
+        return false;
+    }
+
+    manif::SE3d I_H_lf = BipedalLocomotion::Conversions::toManifPose(
+        m_kinDynWithMeasured.kindyn->getWorldTransform("l_sole"));
+    manif::SE3d I_H_rf = BipedalLocomotion::Conversions::toManifPose(
+        m_kinDynWithMeasured.kindyn->getWorldTransform("r_sole"));
+
+    zmpLeft = I_H_lf.act(zmpLeft);
+    zmpRight = I_H_rf.act(zmpRight);
+
+
+    // the global zmp is given by a weighted average
+    zmp = ((leftWrench.force()(2) * zmpLeftDefined) / totalZ) * zmpLeft.head<2>()
+          + ((rightWrench.force()(2) * zmpRightDefined) / totalZ) * zmpRight.head<2>();
+
+    return true;
+}
+
+Eigen::Vector2d WholeBodyQPBlock::computeDesiredZMP(
+    const std::map<std::string, BipedalLocomotion::Contacts::ContactWithCorners>& contacts)
+{
+    Eigen::Vector2d zmp = Eigen::Vector2d::Zero();
+    double totalZ = 0;
+    Eigen::Vector3d localZMP;
+
+    for (const auto& [key, contact] : contacts)
+    {
+        BipedalLocomotion::Math::Wrenchd totalWrench = BipedalLocomotion::Math::Wrenchd::Zero();
+        for (const auto& corner : contact.corners)
+        {
+            totalWrench.force() = corner.force;
+            totalWrench.torque() += corner.position.cross(contact.pose.asSO3().act(corner.force));
+        }
+        if (totalWrench.force()(2) > 0.001)
+        {
+            totalZ += totalWrench.force()(2);
+            localZMP(0) = -totalWrench.torque()(1) / totalWrench.force()(2);
+            localZMP(1) = totalWrench.torque()(0) / totalWrench.force()(2);
+            localZMP(2) = 0.0;
+
+            // the wrench is already expressed in mixed we have just to translate it
+            zmp += totalWrench.force()(2) * contact.pose.act(localZMP).head<2>();
+        }
+    }
+
+    zmp = zmp / totalZ;
+
+    return zmp;
+}
+
+    bool WholeBodyQPBlock::advance()
 {
     bool shouldAdvance = false;
+
+    Eigen::Vector2d desiredZMP = Eigen::Vector2d::Zero();
+    Eigen::Vector2d measuredZMP;
 
     if (m_input.contacts.size() != 0)
     {
@@ -643,9 +871,10 @@ bool WholeBodyQPBlock::advance()
             Eigen::Vector3d dummy = Eigen::Vector3d::Zero();
             m_centroidalSystem.dynamics->setControlInput({m_input.contacts, dummy});
             m_centroidalSystem.integrator->integrate(0, m_dT);
-        }
+            desiredZMP = this->computeDesiredZMP(m_input.contacts);
 
-        shouldAdvance = true;
+            shouldAdvance = true;
+        }
     }
 
     Eigen::Vector3d gravity;
@@ -661,6 +890,28 @@ bool WholeBodyQPBlock::advance()
 
     m_sensorBridge.getJointPositions(m_currentJointPos);
     m_sensorBridge.getJointVelocities(m_currentJointVel);
+
+    for (auto& [key, value] : m_leftFootContacWrenches)
+    {
+        if (!m_sensorBridge.getCartesianWrench(key, value.wrench))
+        {
+            BipedalLocomotion::log()->error("{} Unable to get the left wrench named {}.",
+                                            errorPrefix,
+                                            key);
+            return false;
+        }
+    }
+
+    for (auto& [key, value] : m_rightFootContacWrenches)
+    {
+        if (!m_sensorBridge.getCartesianWrench(key, value.wrench))
+        {
+            BipedalLocomotion::log()->error("{} Unable to get the left wrench named {}.",
+                                            errorPrefix,
+                                            key);
+            return false;
+        }
+    }
 
     if (!this->updateFloatingBase())
     {
@@ -685,6 +936,12 @@ bool WholeBodyQPBlock::advance()
                                                                   manif::SE3d::Tangent::DoF),
                                               m_desJointVel,
                                               gravity);
+
+    if (!this->evaluateZMP(measuredZMP))
+    {
+        BipedalLocomotion::log()->error("{} Unable to evaluate the measured zmp.", errorPrefix);
+        return false;
+    }
 
     // if (!m_leftFootPlanner.getOutput().mixedVelocity.coeffs().isZero())
     // {
@@ -713,6 +970,21 @@ bool WholeBodyQPBlock::advance()
 
     Eigen::Vector3d dcomdes = std::get<1>(m_centroidalSystem.dynamics->getState());
     // dcomdes(2) = 0;
+
+    if (shouldAdvance)
+    {
+        m_CoMZMPController.setSetPoint(dcomdes.head<2>(), comdes.head<2>(), desiredZMP);
+        m_CoMZMPController.setFeedback(iDynTree::toEigen(
+                                           m_kinDynWithMeasured.kindyn->getCenterOfMassPosition())
+                                           .head<2>(),
+                                       measuredZMP,
+                                       0);
+        m_CoMZMPController.advance();
+        dcomdes.head<2>() = m_CoMZMPController.getOutput();
+        m_comSystem.dynamics->setControlInput({dcomdes.head<2>()});
+        m_comSystem.integrator->integrate(0, m_dT);
+        comdes.head<2>() = std::get<0>(m_comSystem.integrator->getSolution());
+    }
 
     m_IKandTasks.comTask->setSetPoint(comdes, dcomdes);
 
@@ -824,7 +1096,7 @@ bool WholeBodyQPBlock::advance()
                .format(CommaInitFmt)
         << ", "
         << iDynTree::toEigen(m_kinDynWithDesired.kindyn->getWorldTransform("r_sole").getPosition())
-               .format(CommaInitFmt)
+               .format(CommaInitFmt) << ", " << desiredZMP.format(CommaInitFmt) << ", " << measuredZMP.format(CommaInitFmt)
         << std::endl;
 
     if (!m_robotControl.setReferences(jointPosition,
