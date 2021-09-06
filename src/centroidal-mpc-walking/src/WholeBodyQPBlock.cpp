@@ -543,7 +543,7 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     m_sensorBridge.getJointPositions(m_desJointPos);
 
     constexpr double scaling = 1;
-    constexpr double scalingPos = 2.0;
+    constexpr double scalingPos = 1.5;
     constexpr double scalingPosY = 0;
     // // t  0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16  17  18  19 20  21
     // 22  23  24  25  26  27  28  29
@@ -847,12 +847,12 @@ Eigen::Vector2d WholeBodyQPBlock::computeDesiredZMP(
     return zmp;
 }
 
-    bool WholeBodyQPBlock::advance()
+bool WholeBodyQPBlock::advance()
 {
     bool shouldAdvance = false;
 
     Eigen::Vector2d desiredZMP = Eigen::Vector2d::Zero();
-    Eigen::Vector2d measuredZMP;
+    Eigen::Vector2d measuredZMP = Eigen::Vector2d::Zero();
 
     if (m_input.contacts.size() != 0)
     {
