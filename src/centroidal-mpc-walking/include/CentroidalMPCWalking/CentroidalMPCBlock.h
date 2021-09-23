@@ -8,6 +8,7 @@
 #ifndef CENTROIDAL_MCP_WALKING_CENTROIDAL_MCP_BLOCK_H
 #define CENTROIDAL_MCP_WALKING_CENTROIDAL_MCP_BLOCK_H
 
+#include <BipedalLocomotion/Math/Wrench.h>
 #include <map>
 #include <memory>
 #include <string>
@@ -40,6 +41,8 @@ struct CentoidalMPCInput
     Eigen::Vector3d dcom;
     Eigen::Vector3d angularMomentum;
 
+    BipedalLocomotion::Math::Wrenchd totalExternalWrench;
+
     manif::SE3d leftFoot;
     manif::SE3d rightFoot;
 
@@ -61,6 +64,8 @@ class CentroidalMPCBlock : public BipedalLocomotion::System::Advanceable<
     BipedalLocomotion::Contacts::ContactPhaseList m_phaseList;
 
     bool m_inputValid{false};
+    double m_currentTime{0};
+    BipedalLocomotion::Contacts::ContactPhaseList::const_iterator m_phaseIt;
 
 public:
     bool initialize(std::weak_ptr<const BipedalLocomotion::ParametersHandler::IParametersHandler>

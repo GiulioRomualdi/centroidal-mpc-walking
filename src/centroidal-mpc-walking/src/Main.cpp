@@ -37,6 +37,11 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
+    std::string temp;
+    BipedalLocomotion::log()->warn("[main] Please remember to check the mass of the robot. It is "
+                                   "hardcoded in the blocks");
+    std::cin >> temp;
+
     // prepare and configure the resource finder
     yarp::os::ResourceFinder& rf = yarp::os::ResourceFinder::getResourceFinderSingleton();
 

@@ -9,6 +9,7 @@
 #include <BipedalLocomotion/Math/Wrench.h>
 #include <Eigen/src/Core/Matrix.h>
 #include <chrono>
+#include <linux/limits.h>
 #include <manif/impl/se3/SE3.h>
 #include <yarp/os/RFModule.h>
 
@@ -45,6 +46,33 @@ using namespace BipedalLocomotion::ParametersHandler;
 
 constexpr double m_dT{0.01};
 double absoluteTime{0};
+bool isLeftAsjustedReady = false;
+bool isRightAsjustedReady = false;
+bool isLeftAdjusterAlreadyUsed = false;
+bool isRightAdjusterAlreadyUsed = false;
+
+float roundoff(float value, unsigned char prec)
+{
+  float pow_10 = pow(10.0f, (float)prec);
+  return round(value * pow_10) / pow_10;
+}
+
+
+void updateContactPhaseList(
+    const std::map<std::string, BipedalLocomotion::Contacts::PlannedContact>& nextPlannedContacts,
+    BipedalLocomotion::Contacts::ContactListMap& contactListMap)
+{
+    for (const auto& [key, contact] : nextPlannedContacts)
+    {
+        using namespace BipedalLocomotion;
+        log()->warn("next planned contact pose {} activation time {} deactivation time {}",
+                    contact.pose,
+                    contact.activationTime,
+                    contact.deactivationTime);
+        auto it = contactListMap.at(key).getPresentContact(contact.activationTime);
+        contactListMap.at(key).editContact(it, contact);
+    }
+}
 
 bool WholeBodyQPBlock::createKinDyn(const std::string& modelPath,
                                     const std::vector<std::string>& jointLists)
@@ -274,6 +302,12 @@ bool WholeBodyQPBlock::instantiateSensorBridge(std::shared_ptr<const IParameters
         list.push(driver.polyDriverDescriptor.poly.get(), key.c_str());
     }
 
+    for (auto& [key, driver] : m_externalContactWrenches)
+    {
+        list.push(driver.polyDriverDescriptor.poly.get(), key.c_str());
+    }
+
+
     if (!m_sensorBridge.setDriversList(list))
     {
         BipedalLocomotion::log()->error("{} Unable to set the driver list.", errorPrefix);
@@ -442,6 +476,30 @@ bool WholeBodyQPBlock::createAllContactWrenchesDriver(
         m_rightFootContacWrenches[descriptor.key].polyDriverDescriptor = descriptor;
     }
 
+    if (!ptr->getParameter("external_contact_wrenches_group", contactWrenchClients))
+    {
+        BipedalLocomotion::log()->error("{} Unable to find the right contact wrench group.",
+                                        errorPrefix);
+        return false;
+    }
+
+    for (const auto& wrench : contactWrenchClients)
+    {
+        BipedalLocomotion::RobotInterface::PolyDriverDescriptor descriptor
+            = this->createContactWrenchDriver(ptr->getGroup(wrench), localPrefix);
+
+        if (!descriptor.isValid())
+        {
+            BipedalLocomotion::log()->error("{} The generic sensor client for the wrench named {} "
+                                            "cannot be opened.",
+                                            errorPrefix,
+                                            wrench);
+            return false;
+        }
+
+        m_externalContactWrenches[descriptor.key].polyDriverDescriptor = descriptor;
+    }
+
     return true;
 }
 
@@ -542,7 +600,7 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     m_sensorBridge.getJointPositions(m_currentJointPos);
     m_sensorBridge.getJointPositions(m_desJointPos);
 
-    constexpr double scaling = 1;
+    constexpr double scaling = 1.0;
     constexpr double scalingPos = 1.5;
     constexpr double scalingPosY = 0;
     // // t  0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16  17  18  19 20  21
@@ -551,96 +609,93 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     // |+++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|++++++++++|---|+++++++++++|
     // // R
     // |+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|+++++++++++|---|++++++++++|---|+++|
-    BipedalLocomotion::Contacts::ContactListMap contactListMap;
 
     Eigen::Vector3d leftPosition = Eigen::Vector3d::Zero();
     leftPosition(1) = 0.08;
     manif::SE3d leftTransform(leftPosition, manif::SO3d::Identity());
 
-    contactListMap["left_foot"].setDefaultIndex(
+    m_contactListMap["left_foot"].setDefaultIndex(
         m_kinDynWithMeasured.kindyn->model().getFrameIndex("l_sole"));
-    contactListMap["left_foot"].addContact(leftTransform, 0.0, 1.0 * scaling);
+    m_contactListMap["left_foot"].addContact(leftTransform, 0.0, 1.0 * scaling);
 
     leftPosition(0) += 0.05 * scalingPos;
     leftTransform.translation(leftPosition);
-    contactListMap["left_foot"].addContact(leftTransform, 2.0 * scaling, 5.0 * scaling);
+    m_contactListMap["left_foot"].addContact(leftTransform, 2.0 * scaling, 5.0 * scaling);
 
     leftPosition(0) += 0.1 * scalingPos;
-    leftPosition(2) = 0.0 + 0.0;
     // leftTransform.quat(Eigen::AngleAxisd(0.1, Eigen::Vector3d::UnitX()));
     leftTransform.translation(leftPosition);
-    contactListMap["left_foot"].addContact(leftTransform, 6.0 * scaling, 9.0 * scaling);
+    m_contactListMap["left_foot"].addContact(leftTransform, 6.0 * scaling, 9.0 * scaling);
 
     leftPosition(0) += 0.1 * scalingPos;
-    leftPosition(2) = 0.0;
     leftTransform.quat(manif::SO3d::Identity());
     leftTransform.translation(leftPosition);
-    contactListMap["left_foot"].addContact(leftTransform, 10.0 * scaling, 13.0 * scaling);
+    m_contactListMap["left_foot"].addContact(leftTransform, 10.0 * scaling, 13.0 * scaling);
 
     leftPosition(0) += 0.1 * scalingPos;
     leftTransform.translation(leftPosition);
-    contactListMap["left_foot"].addContact(leftTransform, 14.0 * scaling, 17.0 * scaling);
+    m_contactListMap["left_foot"].addContact(leftTransform, 14.0 * scaling, 17.0 * scaling);
 
     leftPosition(1) -= 0.01 * scalingPosY;
     leftTransform.translation(leftPosition);
-    contactListMap["left_foot"].addContact(leftTransform, 18.0 * scaling, 21.0 * scaling);
+    m_contactListMap["left_foot"].addContact(leftTransform, 18.0 * scaling, 21.0 * scaling);
 
     leftPosition(1) -= 0.01 * scalingPosY;
     leftTransform.translation(leftPosition);
-    contactListMap["left_foot"].addContact(leftTransform, 22.0 * scaling, 25.0 * scaling);
+    m_contactListMap["left_foot"].addContact(leftTransform, 22.0 * scaling, 25.0 * scaling);
 
     leftPosition(1) -= 0.01 * scalingPosY;
     leftTransform.translation(leftPosition);
-    contactListMap["left_foot"].addContact(leftTransform, 26.0 * scaling, 29.0 * scaling);
+    m_contactListMap["left_foot"].addContact(leftTransform, 26.0 * scaling, 29.0 * scaling);
 
     // right foot
     // first footstep
     Eigen::Vector3d rightPosition = Eigen::Vector3d::Zero();
     rightPosition(1) = -0.08;
     manif::SE3d rightTransform(rightPosition, manif::SO3d::Identity());
-    contactListMap["right_foot"].setDefaultIndex(
+    m_contactListMap["right_foot"].setDefaultIndex(
         m_kinDynWithMeasured.kindyn->model().getFrameIndex("r_sole"));
-    contactListMap["right_foot"].addContact(rightTransform, 0.0, 3.0 * scaling);
+    m_contactListMap["right_foot"].addContact(rightTransform, 0.0, 3.0 * scaling);
 
     rightPosition(0) += 0.1 * scalingPos;
     rightTransform.translation(rightPosition);
-    contactListMap["right_foot"].addContact(rightTransform, 4.0 * scaling, 7.0 * scaling);
+    m_contactListMap["right_foot"].addContact(rightTransform, 4.0 * scaling, 7.0 * scaling);
 
     rightPosition(0) += 0.1 * scalingPos;
     rightTransform.translation(rightPosition);
-    contactListMap["right_foot"].addContact(rightTransform, 8.0 * scaling, 11.0 * scaling);
+    m_contactListMap["right_foot"].addContact(rightTransform, 8.0 * scaling, 11.0 * scaling);
 
     rightPosition(0) += 0.1 * scalingPos;
     rightTransform.translation(rightPosition);
-    contactListMap["right_foot"].addContact(rightTransform, 12.0 * scaling, 15.0 * scaling);
+    m_contactListMap["right_foot"].addContact(rightTransform, 12.0 * scaling, 15.0 * scaling);
 
-    rightPosition(0) += 0.0 * scalingPos;
+    rightPosition(0) += 0.05 * scalingPos;
     rightPosition(1) -= 0.01 * scalingPosY;
     rightTransform.translation(rightPosition);
-    contactListMap["right_foot"].addContact(rightTransform, 16.0 * scaling, 19.0 * scaling);
-
-    rightPosition(1) -= 0.01 * scalingPosY;
-    rightTransform.translation(rightPosition);
-    contactListMap["right_foot"].addContact(rightTransform, 20.0 * scaling, 23.0 * scaling);
+    m_contactListMap["right_foot"].addContact(rightTransform, 16.0 * scaling, 19.0 * scaling);
 
     rightPosition(1) -= 0.01 * scalingPosY;
     rightTransform.translation(rightPosition);
-    contactListMap["right_foot"].addContact(rightTransform, 24.0 * scaling, 27.0 * scaling);
+    m_contactListMap["right_foot"].addContact(rightTransform, 20.0 * scaling, 23.0 * scaling);
 
     rightPosition(1) -= 0.01 * scalingPosY;
     rightTransform.translation(rightPosition);
-    contactListMap["right_foot"].addContact(rightTransform, 28.0 * scaling, 29.0 * scaling);
+    m_contactListMap["right_foot"].addContact(rightTransform, 24.0 * scaling, 27.0 * scaling);
+
+    rightPosition(1) -= 0.01 * scalingPosY;
+    rightTransform.translation(rightPosition);
+    m_contactListMap["right_foot"].addContact(rightTransform, 28.0 * scaling, 29.0 * scaling);
 
     // contact phase list
-    // contactListMap = BipedalLocomotion::Contacts::contactListMapFromJson("footsteps.json");
-    BipedalLocomotion::Contacts::ContactPhaseList list;
-    list.setLists(contactListMap);
-    m_fixedFootDetector.setContactPhaseList(list);
+    // m_contactListMap = BipedalLocomotion::Contacts::m_contactListMapFromJson("footsteps.json");
+    m_contactPhaselist.setLists(m_contactListMap);
+    m_fixedFootDetector.setContactPhaseList(m_contactPhaselist);
+    m_phaseIt = m_contactPhaselist.getPresentPhase(absoluteTime);
 
     // feet
     std::shared_ptr<IParametersHandler> a = std::make_shared<StdImplementation>();
     a->setParameter("sampling_time", m_dT);
-    a->setParameter("step_height", 0.02);
+    a->setParameter("step_height", 0.03);
     a->setParameter("foot_apex_time", 0.5);
     a->setParameter("foot_landing_velocity", 0.0);
     a->setParameter("foot_landing_acceleration", 0.0);
@@ -648,8 +703,13 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
     m_leftFootPlanner.initialize(a);
     m_rightFootPlanner.initialize(a);
 
-    m_leftFootPlanner.setContactList(contactListMap["left_foot"]);
-    m_rightFootPlanner.setContactList(contactListMap["right_foot"]);
+    m_leftFootPlanner.setContactList(m_contactListMap["left_foot"]);
+    m_rightFootPlanner.setContactList(m_contactListMap["right_foot"]);
+
+    m_leftFootAdjuster.setAdvanceTimeStep(m_dT);
+    m_rightFootAdjuster.setAdvanceTimeStep(m_dT);
+    m_leftFootAdjuster.setFinalConditions(Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero());
+    m_rightFootAdjuster.setFinalConditions(Eigen::Vector2d::Zero(), Eigen::Vector2d::Zero());
 
     if (!this->updateFloatingBase())
     {
@@ -730,8 +790,33 @@ bool WholeBodyQPBlock::initialize(std::weak_ptr<const IParametersHandler> handle
               "lf_des_x, lf_des_y, lf_des_z, lf_meas_x, lf_meas_y, lf_meas_z, lf_meas_d_x, "
               "lf_meas_d_y, lf_meas_d_z, rf_des_x, rf_des_y, rf_des_z, rf_meas_x, rf_meas_y, "
               "rf_meas_z, rf_meas_d_x, rf_meas_d_y, rf_meas_d_z , zmp_des_x, zmp_des_y, "
-              "zmp_meas_x, zmp_meas_y"
-           << std::endl;
+              "zmp_meas_x, zmp_meas_y, dcom_x, dcom_y, dcom_z, des_dcom_x, des_dcom_y, des_dcom_z,"
+              "d_torso_pitch_des, d_torso_roll_des, d_torso_yaw_des, d_l_shoulder_pitch_des, "
+              "d_l_shoulder_roll_des, d_l_shoulder_yaw_des, d_l_elbow_des, d_r_shoulder_pitch_des, "
+              "d_r_shoulder_roll_des, d_r_shoulder_yaw_des, d_r_elbow_des, d_l_hip_pitch_des, "
+              "d_l_hip_roll_des, d_l_hip_yaw_des, d_l_knee_des, d_l_ankle_pitch_des, d_l_ankle_roll_des, "
+              "d_r_hip_pitch_des, d_r_hip_roll_des, d_r_hip_yaw_des, d_r_knee_des, d_r_ankle_pitch_des, "
+              "d_r_ankle_roll_des, "
+              "d_torso_pitch, d_torso_roll, d_torso_yaw, d_l_shoulder_pitch, "
+              "d_l_shoulder_roll, d_l_shoulder_yaw, d_l_elbow, d_r_shoulder_pitch, "
+              "d_r_shoulder_roll, d_r_shoulder_yaw, d_r_elbow, d_l_hip_pitch, "
+              "d_l_hip_roll, d_l_hip_yaw, d_l_knee, d_l_ankle_pitch, d_l_ankle_roll, "
+              "d_r_hip_pitch, d_r_hip_roll, d_r_hip_yaw, d_r_knee, d_r_ankle_pitch, "
+              "d_r_ankle_roll, rf_adj_x, rf_adj_y, rf_adj_z, lf_adj_x, lf_adj_y, lf_adj_z, "
+              "external_fx, external_fy, external_fz, external_taux, external_tauy, external_tauz, computational_time, "
+               "ang_mom_x, ang_mom_y, ang_mom_z";
+
+    for (int i = 0; i < 2; i++)
+    {
+        for (int j = 0; j < 4; j++)
+        {
+          myfile << " , contact_" << i << "_corner_" << j << "_x";
+          myfile << " , contact_" << i << "_corner_" << j << "_y";
+          myfile << " , contact_" << i << "_corner_" << j << "_z";
+        }
+    }
+
+    myfile << std::endl;
 
     BipedalLocomotion::log()->info("{} The WholeBodyQPBlock has been configured.", logPrefix);
 
@@ -838,7 +923,27 @@ Eigen::Vector2d WholeBodyQPBlock::computeDesiredZMP(
             localZMP(2) = 0.0;
 
             // the wrench is already expressed in mixed we have just to translate it
-            zmp += totalWrench.force()(2) * contact.pose.act(localZMP).head<2>();
+
+            std::cerr << "-----------------> " << key << std::endl;
+
+            // if left
+            if (key == "left_foot")
+            {
+                manif::SE3d temptransofrm = BipedalLocomotion::Conversions::toManifPose(
+                    m_kinDynWithDesired.kindyn->getWorldTransform("l_sole"));
+                zmp += totalWrench.force()(2) * temptransofrm.act(localZMP).head<2>();
+            }
+            // if left
+            else if (key == "right_foot")
+            {
+                manif::SE3d temptransofrm = BipedalLocomotion::Conversions::toManifPose(
+                    m_kinDynWithDesired.kindyn->getWorldTransform("r_sole"));
+                zmp += totalWrench.force()(2) * temptransofrm.act(localZMP).head<2>();
+            }
+            else
+            {
+                BipedalLocomotion::log()->error("Problem in evaluated the desired zmp");
+            }
         }
     }
 
@@ -851,37 +956,11 @@ bool WholeBodyQPBlock::advance()
 {
     bool shouldAdvance = false;
 
+    constexpr auto errorPrefix = "[WholeBodyQPBlock::advance]";
+
     Eigen::Vector2d desiredZMP = Eigen::Vector2d::Zero();
     Eigen::Vector2d measuredZMP = Eigen::Vector2d::Zero();
 
-    if (m_input.contacts.size() != 0)
-    {
-        Eigen::Vector3d force = Eigen::Vector3d::Zero();
-        for (const auto& [key, value] : m_input.contacts)
-        {
-            for (const auto& c : value.corners)
-            {
-                force += c.force;
-                // BipedalLocomotion::log()->info(" Foot {}, force: {}", key, c.force.transpose());
-            }
-        }
-
-        if (force.norm() > 0.01)
-        {
-            Eigen::Vector3d dummy = Eigen::Vector3d::Zero();
-            m_centroidalSystem.dynamics->setControlInput({m_input.contacts, dummy});
-            m_centroidalSystem.integrator->integrate(0, m_dT);
-            desiredZMP = this->computeDesiredZMP(m_input.contacts);
-
-            shouldAdvance = true;
-        }
-    }
-
-    Eigen::Vector3d gravity;
-    gravity.setZero();
-    gravity(2) = -BipedalLocomotion::Math::StandardAccelerationOfGravitation;
-
-    constexpr auto errorPrefix = "[WholeBodyQPBlock::advance]";
     if (!m_sensorBridge.advance())
     {
         BipedalLocomotion::log()->error("{} Unable to get the robot state.", errorPrefix);
@@ -891,27 +970,13 @@ bool WholeBodyQPBlock::advance()
     m_sensorBridge.getJointPositions(m_currentJointPos);
     m_sensorBridge.getJointVelocities(m_currentJointVel);
 
-    for (auto& [key, value] : m_leftFootContacWrenches)
-    {
-        if (!m_sensorBridge.getCartesianWrench(key, value.wrench))
-        {
-            BipedalLocomotion::log()->error("{} Unable to get the left wrench named {}.",
-                                            errorPrefix,
-                                            key);
-            return false;
-        }
-    }
+    Eigen::Vector3d gravity;
+    gravity.setZero();
+    gravity(2) = -BipedalLocomotion::Math::StandardAccelerationOfGravitation;
 
-    for (auto& [key, value] : m_rightFootContacWrenches)
-    {
-        if (!m_sensorBridge.getCartesianWrench(key, value.wrench))
-        {
-            BipedalLocomotion::log()->error("{} Unable to get the left wrench named {}.",
-                                            errorPrefix,
-                                            key);
-            return false;
-        }
-    }
+
+
+
 
     if (!this->updateFloatingBase())
     {
@@ -937,6 +1002,280 @@ bool WholeBodyQPBlock::advance()
                                               m_desJointVel,
                                               gravity);
 
+
+    for (auto& [key, value] : m_leftFootContacWrenches)
+    {
+        if (!m_sensorBridge.getCartesianWrench(key, value.wrench))
+        {
+            BipedalLocomotion::log()->error("{} Unable to get the left wrench named {}.",
+                                            errorPrefix,
+                                            key);
+            return false;
+        }
+    }
+
+    for (auto& [key, value] : m_rightFootContacWrenches)
+    {
+        if (!m_sensorBridge.getCartesianWrench(key, value.wrench))
+        {
+            BipedalLocomotion::log()->error("{} Unable to get the left wrench named {}.",
+                                            errorPrefix,
+                                            key);
+            return false;
+        }
+    }
+
+    BipedalLocomotion::Math::Wrenchd totalExternalWrench = BipedalLocomotion::Math::Wrenchd::Zero();
+    for (auto& [key, value] : m_externalContactWrenches)
+    {
+        if (!m_sensorBridge.getCartesianWrench(key, value.wrench))
+        {
+            BipedalLocomotion::log()->error("{} Unable to get the left wrench named {}.",
+                                            errorPrefix,
+                                            key);
+            return false;
+        }
+
+        manif::SO3d rotation = BipedalLocomotion::Conversions::toManifRot(
+            m_kinDynWithMeasured.kindyn->getWorldTransform("root_link").getRotation());
+        totalExternalWrench += rotation * value.wrench;
+    }
+
+    if (totalExternalWrench.force().norm() < 30)
+    {
+        totalExternalWrench.setZero();
+    } else
+    {
+        BipedalLocomotion::log()->error("external push detected {} norm {}",
+                                        totalExternalWrench.force().transpose(),
+                                        totalExternalWrench.force().norm());
+        totalExternalWrench.force()(2) = 0;
+
+        const double totalMass = 52.0102;
+        totalExternalWrench = totalExternalWrench / totalMass;
+    }
+
+    if (m_input.contacts.size() != 0)
+    {
+        Eigen::Vector3d force = Eigen::Vector3d::Zero();
+        for (const auto& [key, value] : m_input.contacts)
+        {
+            for (const auto& c : value.corners)
+            {
+                force += c.force;
+                // BipedalLocomotion::log()->info(" Foot {}, force: {}", key, c.force.transpose());
+            }
+        }
+
+        if (force.norm() > 0.01)
+        {
+            m_centroidalSystem.dynamics->setControlInput({m_input.contacts, m_input.externalWrench});
+            m_centroidalSystem.integrator->integrate(0, m_dT);
+            desiredZMP = this->computeDesiredZMP(m_input.contacts);
+            updateContactPhaseList(m_input.nextPlannedContact, m_contactListMap);
+
+            shouldAdvance = true;
+
+            auto newPhaseIt = m_contactPhaselist.getPresentPhase(absoluteTime);
+            if(newPhaseIt != m_phaseIt)
+            {
+                // check if new contact is established
+                if (m_phaseIt->activeContacts.size() == 1 && newPhaseIt->activeContacts.size() == 2)
+                {
+                  BipedalLocomotion::log()->info("sono qui dentro {}", m_input.nextPlannedContact.size());
+
+                    // update the contact phase list
+                    m_contactPhaselist.setLists(m_contactListMap);
+                    m_leftFootPlanner.setContactListWithotResettingTheInternalTime(
+                        m_contactPhaselist.lists().at("left_foot"));
+                    m_rightFootPlanner.setContactListWithotResettingTheInternalTime(
+                        m_contactPhaselist.lists().at("right_foot"));
+                    m_fixedFootDetector.setContactPhaseListWithoutResetInternalTime(
+                        m_contactPhaselist);
+
+                    // the iterators have been modified we have to compute the new one
+                    m_phaseIt = m_contactPhaselist.getPresentPhase(absoluteTime);
+                } else
+                {
+                    // the iterators did not change no need to get the present phase again
+                    m_phaseIt = newPhaseIt;
+                }
+            }
+            newPhaseIt = m_contactPhaselist.getPresentPhase(absoluteTime);
+
+            if (newPhaseIt->activeContacts.size() == 2)
+            {
+                // if the left foot is in contact the adjusted cannot be used. If next planned
+                // right is found this will be avaiable till the next contact enabled
+                isLeftAsjustedReady = false;
+                isLeftAdjusterAlreadyUsed = false;
+            }
+            // for each contact we check if is currently enabled or not
+            else
+            {
+                // is the next planned contact available
+                const auto nextPlannedLeft = m_input.nextPlannedContact.find("left_foot");
+                if (nextPlannedLeft != m_input.nextPlannedContact.end())
+                {
+                  BipedalLocomotion::log()->warn("left adjust ready");
+                    isLeftAsjustedReady = true;
+                    if (nextPlannedLeft->second.pose.translation().head<2>()
+                        != m_nextLeftFootPositionXY)
+                    {
+                        m_nextLeftFootPositionXY
+                            = nextPlannedLeft->second.pose.translation().head<2>();
+
+                        if (isLeftAdjusterAlreadyUsed)
+                        {
+                          BipedalLocomotion::log()->warn("left adjust already used");
+
+                          if(absoluteTime > nextPlannedLeft->second.activationTime)
+                          {
+                              BipedalLocomotion::log()
+                                  ->error("{} Left foot adsjustement. The left absolute time is "
+                                          "higher that the activation time. abs {} activation{}",
+                                          errorPrefix,
+                                          absoluteTime,
+                                          nextPlannedLeft->second.activationTime);
+                              return false;
+                          }
+                            auto state = m_leftFootAdjuster.getOutput();
+                            m_leftFootAdjuster.setInitialConditions(state.velocity,
+                                                                    state.acceleration);
+                            m_leftFootAdjuster.setKnots({state.position, m_nextLeftFootPositionXY},
+                                                        {absoluteTime,
+                                                         nextPlannedLeft->second.activationTime});
+                        } else
+                        {
+                            BipedalLocomotion::log()->warn("left adjust NOT already used");
+
+                            if(absoluteTime > nextPlannedLeft->second.activationTime)
+                            {
+                              BipedalLocomotion::log()
+                                  ->error("{} Left foot adsjustement. The left absolute time is "
+                                          "higher that the activation time. abs {} activation{}",
+                                          errorPrefix,
+                                          absoluteTime,
+                                          nextPlannedLeft->second.activationTime);
+                              return false;
+                          }
+
+
+                            m_leftFootAdjuster.setInitialConditions(m_leftFootPlanner.getOutput()
+                                                                        .mixedVelocity.coeffs()
+                                                                        .head<2>(),
+                                                                    m_leftFootPlanner.getOutput()
+                                                                        .mixedAcceleration.coeffs()
+                                                                        .head<2>());
+                            m_leftFootAdjuster.setKnots({m_leftFootPlanner.getOutput()
+                                                             .transform.translation()
+                                                             .head<2>(),
+                                                         m_nextLeftFootPositionXY},
+                                                        {absoluteTime,
+                                                         nextPlannedLeft->second.activationTime});
+                        }
+                        isLeftAdjusterAlreadyUsed = true;
+                    }
+                }
+            }
+
+            if (newPhaseIt->activeContacts.size() == 2)
+            {
+                // if the right foot is in contact the adjusted cannot be used. If next planned
+                // right is found this will be avaiable till the next contact enabled
+                isRightAsjustedReady = false;
+                isRightAdjusterAlreadyUsed = false;
+            }
+            // for each contact we check if is currently enabled or not
+            else
+            {
+                // is the next planned contact available
+                const auto nextPlannedRight = m_input.nextPlannedContact.find("right_foot");
+                if (nextPlannedRight != m_input.nextPlannedContact.end())
+                {
+                    BipedalLocomotion::log()->warn("right adjust ready");
+                    isRightAsjustedReady = true;
+                    if (nextPlannedRight->second.pose.translation().head<2>()
+                        != m_nextRightFootPositionXY)
+                    {
+                        m_nextRightFootPositionXY
+                            = nextPlannedRight->second.pose.translation().head<2>();
+
+                        if (isRightAdjusterAlreadyUsed)
+                        {
+                          if(absoluteTime > nextPlannedRight->second.activationTime)
+                          {
+                              BipedalLocomotion::log()
+                                  ->error("{} Left foot adsjustement. The left absolute time is "
+                                          "higher that the activation time. abs {} activation{}",
+                                          errorPrefix,
+                                          absoluteTime,
+                                          nextPlannedRight->second.activationTime);
+                              return false;
+                          }
+
+                            auto state = m_rightFootAdjuster.getOutput();
+                            BipedalLocomotion::log()->warn("Right already used state position t = "
+                                                           "{}, p = {}.",
+                                                           absoluteTime,
+                                                           state.position.transpose());
+                            BipedalLocomotion::log()->warn("Right already used final state position t = "
+                                                           "{}, p = {}.",
+                                                           nextPlannedRight->second.activationTime,
+                                                           m_nextRightFootPositionXY.transpose());
+                            m_rightFootAdjuster.setInitialConditions(state.velocity,
+                                                                     state.acceleration);
+                            m_rightFootAdjuster.setKnots({state.position,
+                                                          m_nextRightFootPositionXY},
+                                                         {absoluteTime,
+                                                          nextPlannedRight->second.activationTime});
+                        } else
+                        {
+
+                            if (absoluteTime > nextPlannedRight->second.activationTime)
+                            {
+                                BipedalLocomotion::log()
+                                    ->error("{} Left foot adsjustement. The left absolute time is "
+                                            "higher that the activation time. abs {} activation{}",
+                                            errorPrefix,
+                                            absoluteTime,
+                                            nextPlannedRight->second.activationTime);
+                                return false;
+                            }
+
+                            m_rightFootAdjuster.setInitialConditions(m_rightFootPlanner.getOutput()
+                                                                         .mixedVelocity.coeffs()
+                                                                         .head<2>(),
+                                                                     m_rightFootPlanner.getOutput()
+                                                                         .mixedAcceleration.coeffs()
+                                                                         .head<2>());
+                            m_rightFootAdjuster.setKnots({m_rightFootPlanner.getOutput()
+                                                              .transform.translation()
+                                                              .head<2>(),
+                                                          m_nextRightFootPositionXY},
+                                                         {absoluteTime,
+                                                          nextPlannedRight->second.activationTime});
+                            BipedalLocomotion::log()->warn("Right first time state position t = "
+                                                           "{}, p = {}.",
+                                                           absoluteTime,
+                                                           m_rightFootPlanner.getOutput()
+                                                               .transform.translation()
+                                                               .head<2>()
+                                                               .transpose());
+                            BipedalLocomotion::log()->warn("Right already used final state "
+                                                           "position t = "
+                                                           "{}, p = {}.",
+                                                           nextPlannedRight->second.activationTime,
+                                                           m_nextRightFootPositionXY.transpose());
+                        }
+                        isRightAdjusterAlreadyUsed = true;
+                    }
+                }
+            }
+        }
+    }
+
+
     if (!this->evaluateZMP(measuredZMP))
     {
         BipedalLocomotion::log()->error("{} Unable to evaluate the measured zmp.", errorPrefix);
@@ -959,11 +1298,37 @@ bool WholeBodyQPBlock::advance()
     //     m_IKandTasks.rightFootTask->disableControl();
     // }
 
-    m_IKandTasks.leftFootTask->setSetPoint(m_leftFootPlanner.getOutput().transform,
-                                           m_leftFootPlanner.getOutput().mixedVelocity);
+    manif::SE3d transformLeft = m_leftFootPlanner.getOutput().transform;
+    if (!isLeftAsjustedReady)
+    {
+        m_IKandTasks.leftFootTask->setSetPoint(m_leftFootPlanner.getOutput().transform,
+                                               m_leftFootPlanner.getOutput().mixedVelocity);
 
-    m_IKandTasks.rightFootTask->setSetPoint(m_rightFootPlanner.getOutput().transform,
-                                            m_rightFootPlanner.getOutput().mixedVelocity);
+    } else
+    {
+
+        Eigen::Vector3d newPosition = transformLeft.translation();
+        newPosition.head<2>() = m_leftFootAdjuster.getOutput().position;
+        transformLeft.translation(newPosition);
+        manif::SE3d::Tangent velocity = m_leftFootPlanner.getOutput().mixedVelocity;
+        velocity.lin().head<2>() = m_leftFootAdjuster.getOutput().velocity;
+
+        m_IKandTasks.leftFootTask->setSetPoint(transformLeft, velocity);
+    }
+
+    manif::SE3d transform = m_rightFootPlanner.getOutput().transform;
+    manif::SE3d::Tangent velocity = m_rightFootPlanner.getOutput().mixedVelocity;
+    if (isRightAsjustedReady)
+    {
+        Eigen::Vector3d newPosition = transform.translation();
+        newPosition.head<2>() = m_rightFootAdjuster.getOutput().position;
+        transform.translation(newPosition);
+
+        velocity.lin().head<2>() = m_rightFootAdjuster.getOutput().velocity;
+    }
+
+    BipedalLocomotion::log()->warn("Right foot position to IK {}", transform.translation().transpose());
+    m_IKandTasks.rightFootTask->setSetPoint(transform, velocity);
 
     Eigen::Vector3d comdes = std::get<0>(m_centroidalSystem.dynamics->getState());
     // comdes(2) = com0z;
@@ -1027,8 +1392,20 @@ bool WholeBodyQPBlock::advance()
         m_leftFootPlanner.advance();
         m_rightFootPlanner.advance();
 
+        // if left adjuster can be used please advance
+        if(isLeftAsjustedReady)
+        {
+          m_leftFootAdjuster.advance();
+        }
+        if(isRightAsjustedReady)
+        {
+          m_rightFootAdjuster.advance();
+        }
+
+
         absoluteTime += m_dT;
-        if (absoluteTime > 14.5)
+        absoluteTime = roundoff(absoluteTime, 3);
+        if (absoluteTime > 40 /1.5)
         {
             BipedalLocomotion::log()->error("{} Experiment ended", errorPrefix);
             return false;
@@ -1060,6 +1437,10 @@ bool WholeBodyQPBlock::advance()
     m_output.com = std::get<0>(m_centroidalSystem.dynamics->getState());
     m_output.dcom = std::get<1>(m_centroidalSystem.dynamics->getState());
     m_output.angularMomentum = std::get<2>(m_centroidalSystem.dynamics->getState());
+    // m_output.com = iDynTree::toEigen(m_kinDynWithMeasured.kindyn->getCenterOfMassPosition());
+    // m_output.dcom = iDynTree::toEigen(m_kinDynWithMeasured.kindyn->getCenterOfMassVelocity());
+    // m_output.angularMomentum = std::get<2>(m_centroidalSystem.dynamics->getState());
+    m_output.totalExternalWrench = totalExternalWrench;
 
     m_output.isValid = true;
 
@@ -1076,6 +1457,8 @@ bool WholeBodyQPBlock::advance()
     //     .transpose() << " " << jointPosition.transpose() << " " <<  m_currentJointPos.transpose()
     //     << std::endl;
 
+    if(shouldAdvance)
+    {
     Eigen::IOFormat
         CommaInitFmt(Eigen::StreamPrecision, Eigen::DontAlignCols, ", ", ", ", "", "", "", "");
     myfile
@@ -1096,8 +1479,28 @@ bool WholeBodyQPBlock::advance()
                .format(CommaInitFmt)
         << ", "
         << iDynTree::toEigen(m_kinDynWithDesired.kindyn->getWorldTransform("r_sole").getPosition())
-               .format(CommaInitFmt) << ", " << desiredZMP.format(CommaInitFmt) << ", " << measuredZMP.format(CommaInitFmt)
-        << std::endl;
+               .format(CommaInitFmt)
+        << ", " << desiredZMP.format(CommaInitFmt) << ", " << measuredZMP.format(CommaInitFmt)
+        << ", "
+        << iDynTree::toEigen(m_kinDynWithMeasured.kindyn->getCenterOfMassVelocity())
+               .format(CommaInitFmt)
+        << ", " << std::get<1>(m_centroidalSystem.dynamics->getState()).format(CommaInitFmt) << ", "
+        << m_desJointVel.format(CommaInitFmt) << ", " << m_currentJointVel.format(CommaInitFmt)
+        << ", " << transform.translation().format(CommaInitFmt) << ", "
+        << transformLeft.translation().format(CommaInitFmt) << ", "
+        << totalExternalWrench.transpose().format(CommaInitFmt) << ", " << m_input.computationalTime
+        << ", " << m_output.angularMomentum.format(CommaInitFmt);
+
+    for (const auto& [key, contact] : m_input.contacts)
+    {
+        for (const auto& corner : contact.corners)
+        {
+            myfile << ", " << corner.force.transpose().format(CommaInitFmt);
+        }
+    }
+    myfile << std::endl;
+
+    }
 
     if (!m_robotControl.setReferences(jointPosition,
                                       BipedalLocomotion::RobotInterface::IRobotControl::

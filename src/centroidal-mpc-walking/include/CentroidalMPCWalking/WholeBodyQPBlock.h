@@ -8,6 +8,8 @@
 #ifndef CENTROIDAL_MCP_WALKING_WHOLE_BODY_QP_BLOCK_H
 #define CENTROIDAL_MCP_WALKING_WHOLE_BODY_QP_BLOCK_H
 
+#include <BipedalLocomotion/Planners/QuinticSpline.h>
+#include <Eigen/src/Core/Matrix.h>
 #include <string>
 #include <map>
 #include <memory>
@@ -82,6 +84,8 @@ class WholeBodyQPBlock : public BipedalLocomotion::System::Advanceable<
 
     std::unordered_map<std::string, ContactWrenchHandler> m_leftFootContacWrenches;
     std::unordered_map<std::string, ContactWrenchHandler> m_rightFootContacWrenches;
+    std::unordered_map<std::string, ContactWrenchHandler> m_externalContactWrenches;
+
 
     BipedalLocomotion::RobotInterface::YarpRobotControl m_robotControl; /**< Robot control object. */
     BipedalLocomotion::RobotInterface::YarpSensorBridge m_sensorBridge; /**< Sensor bridge object. */
@@ -92,7 +96,15 @@ class WholeBodyQPBlock : public BipedalLocomotion::System::Advanceable<
     BipedalLocomotion::Planners::SwingFootPlanner m_leftFootPlanner;
     BipedalLocomotion::Planners::SwingFootPlanner m_rightFootPlanner;
 
-  BipedalLocomotion::SimplifiedModelControllers::CoMZMPController m_CoMZMPController;
+    BipedalLocomotion::Planners::QuinticSpline m_rightFootAdjuster;
+    BipedalLocomotion::Planners::QuinticSpline m_leftFootAdjuster;
+    Eigen::Vector2d m_nextLeftFootPositionXY;
+    Eigen::Vector2d m_nextRightFootPositionXY;
+
+    BipedalLocomotion::SimplifiedModelControllers::CoMZMPController m_CoMZMPController;
+    BipedalLocomotion::Contacts::ContactPhaseList m_contactPhaselist;
+    BipedalLocomotion::Contacts::ContactListMap m_contactListMap;
+    BipedalLocomotion::Contacts::ContactPhaseList::const_iterator m_phaseIt;
 
     struct InverseKinematicsAndTasks
     {

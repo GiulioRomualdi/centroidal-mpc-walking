@@ -9,6 +9,7 @@
 #include <BipedalLocomotion/Contacts/ContactPhaseList.h>
 #include <BipedalLocomotion/Planners/QuinticSpline.h>
 
+#include <BipedalLocomotion/System/Clock.h>
 #include <CentroidalMPCWalking/CentroidalMPCBlock.h>
 #include <manif/manif.h>
 
@@ -17,9 +18,50 @@
 using namespace CentroidalMPCWalking;
 using namespace BipedalLocomotion::ParametersHandler;
 
+
+
 bool isFirstRun{true};
 Eigen::MatrixXd comTraj(3, 1500);
 int indexCoM{0};
+
+
+float roundoff1(float value, unsigned char prec)
+{
+  float pow_10 = pow(10.0f, (float)prec);
+  return round(value * pow_10) / pow_10;
+}
+
+
+void updateContactPhaseList(
+    const std::map<std::string, BipedalLocomotion::Contacts::PlannedContact>& nextPlannedContacts,
+    BipedalLocomotion::Contacts::ContactPhaseList& phaseList)
+{
+    auto newList = phaseList.lists();
+
+    BipedalLocomotion::log()->info("--------------___> update contact list number contact {}", nextPlannedContacts.size());
+
+    for (const auto& [key, contact] : nextPlannedContacts)
+    {
+        BipedalLocomotion::log()->info(" -----------------__> next planned  name {} contact pose "
+                                       "{} activation time {} deactivation time {}",
+                                       key,
+                                       contact.pose,
+                                       contact.activationTime,
+                                       contact.deactivationTime);
+        auto it = newList.at(key).getPresentContact(contact.activationTime);
+
+        BipedalLocomotion::log()->info(" -----------------__> found contact "
+                                       "activation time {} deactivation time {}",
+                                       it->activationTime,
+                                       it->deactivationTime);
+
+        newList.at(key).editContact(it, contact);
+    }
+
+    phaseList.setLists(newList);
+}
+
+
 bool CentroidalMPCBlock::initialize(std::weak_ptr<const IParametersHandler> handler)
 {
     if (!m_controller.initialize(handler))
@@ -34,7 +76,7 @@ bool CentroidalMPCBlock::initialize(std::weak_ptr<const IParametersHandler> hand
 
 const CentroidalMPCBlock::Output& CentroidalMPCBlock::getOutput() const
 {
-    return m_controller.getOutput();
+    return m_output;
 }
 
 bool CentroidalMPCBlock::setInput(const Input& input)
@@ -124,7 +166,7 @@ bool CentroidalMPCBlock::setInput(const Input& input)
             rightTransform.translation(rightPosition);
             contactListMap["right_foot"].addContact(rightTransform, 12.0 * scaling, 15.0 * scaling);
 
-            rightPosition(0) += 0.0 * scalingPos;
+            rightPosition(0) += 0.05 * scalingPos;
             rightPosition(1) -= 0.01 * scalingPosY;
             rightTransform.translation(rightPosition);
             contactListMap["right_foot"].addContact(rightTransform, 16.0 * scaling, 19.0 * scaling);
@@ -144,6 +186,7 @@ bool CentroidalMPCBlock::setInput(const Input& input)
             // contactListMap =
             // BipedalLocomotion::Contacts::contactListMapFromJson("footsteps.json");
             m_phaseList.setLists(contactListMap);
+            m_phaseIt = m_phaseList.begin();
 
             std::vector<Eigen::VectorXd> comKnots;
             std::vector<double> timeKnots;
@@ -203,7 +246,10 @@ bool CentroidalMPCBlock::setInput(const Input& input)
             comTraj.rightCols(comTraj.cols() - tempInt).colwise() = comTraj.col(tempInt - 1);
         }
 
-        return m_controller.setState(input.com, input.dcom, input.angularMomentum);
+        return m_controller.setState(input.com,
+                                     input.dcom,
+                                     input.angularMomentum,
+                                     input.totalExternalWrench.force());
     }
     return true;
 }
@@ -215,6 +261,33 @@ bool CentroidalMPCBlock::advance()
 
     if (m_inputValid)
     {
+
+        std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+
+        // updateContactPhaseList(m_controller.getOutput().nextPlannedContact, m_phaseList);
+
+        // update the phaseList this happens only when a new contact should be established
+
+        BipedalLocomotion::log()->info("--------------> current time {}", m_currentTime);
+
+        auto newPhaseIt = m_phaseList.getPresentPhase(m_currentTime);
+        if (newPhaseIt != m_phaseIt)
+        { // check if new contact is established
+            if (m_phaseIt->activeContacts.size() == 1 && newPhaseIt->activeContacts.size() == 2)
+            {
+              BipedalLocomotion::log()->info("--------------> updating phase");
+                updateContactPhaseList(m_controller.getOutput().nextPlannedContact, m_phaseList);
+
+                // the iterators have been modified we have to compute the new one
+                m_phaseIt = m_phaseList.getPresentPhase(m_currentTime);
+            } else
+            {
+              BipedalLocomotion::log()->info("--------------> not updating phase");
+                // the iterators did not change no need to get the present phase again
+                m_phaseIt = newPhaseIt;
+            }
+        }
+
         if (!m_controller.setReferenceTrajectory(comTraj.rightCols(comTraj.cols() - indexCoM)))
         {
             blf::log()->error("{} Unable to set the reference CoM position.", logPrefix);
@@ -234,6 +307,18 @@ bool CentroidalMPCBlock::advance()
         }
 
         indexCoM++;
+
+        std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
+
+        m_output.computationalTime = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+        m_output.nextPlannedContact = m_controller.getOutput().nextPlannedContact;
+        m_output.contacts = m_controller.getOutput().contacts;
+        m_output.externalWrench = m_controller.getOutput().externalWrench;
+
+        m_currentTime += 0.1;
+        m_currentTime = roundoff1(m_currentTime, 2);
+
+
         return true;
     }
     return true;
