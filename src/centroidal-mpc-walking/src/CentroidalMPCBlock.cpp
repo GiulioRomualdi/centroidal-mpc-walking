@@ -94,7 +94,7 @@ bool CentroidalMPCBlock::setInput(const Input& input)
             // first footstep
 
             constexpr double scaling = 1;
-            constexpr double scalingPos = 1.5;
+            constexpr double scalingPos = 2.5;
             constexpr double scalingPosY = 0;
             // // t  0   1   2   3   4   5   6   7   8   9   10  11  12  13  14  15  16  17  18  19
             // 20  21  22  23  24  25  26  27
@@ -159,10 +159,12 @@ bool CentroidalMPCBlock::setInput(const Input& input)
             contactListMap["right_foot"].addContact(rightTransform, 4.0 * scaling, 7.0 * scaling);
 
             rightPosition(0) += 0.1 * scalingPos;
+            rightPosition(2) = 0.025;
             rightTransform.translation(rightPosition);
             contactListMap["right_foot"].addContact(rightTransform, 8.0 * scaling, 11.0 * scaling);
 
             rightPosition(0) += 0.1 * scalingPos;
+            rightPosition(2) = 0;
             rightTransform.translation(rightPosition);
             contactListMap["right_foot"].addContact(rightTransform, 12.0 * scaling, 15.0 * scaling);
 
